@@ -35,17 +35,24 @@ _SCHEMATIC_HTML = """
       </filter>
     </defs>
     <rect class="quad-bg" x="0" y="0" width="300" height="300" rx="12" />
-    <g id="quad-mount">
-      <rect class="mount-bracket" x="118" y="248" width="64" height="10" rx="3" />
-      <rect class="mount-post" x="146" y="238" width="8" height="12" rx="2" />
+    <g id="quad-stand">
+      <rect class="stand-base" x="108" y="254" width="84" height="7" rx="2" />
+      <rect class="stand-post" x="147" y="174" width="6" height="82" rx="2" />
     </g>
     <g id="quad-frame">
       <line class="arm" x1="150" y1="150" x2="78" y2="78" />
       <line class="arm" x1="150" y1="150" x2="78" y2="222" />
       <line class="arm" x1="150" y1="150" x2="222" y2="222" />
       <line class="arm" x1="150" y1="150" x2="222" y2="78" />
-      <rect class="body" x="128" y="128" width="44" height="44" rx="10" />
-      <polygon class="nose" points="150,108 142,126 158,126" />
+      <circle class="motor-pad" cx="78" cy="78" r="7" />
+      <circle class="motor-pad" cx="78" cy="222" r="7" />
+      <circle class="motor-pad" cx="222" cy="222" r="7" />
+      <circle class="motor-pad" cx="222" cy="78" r="7" />
+      <rect class="body" x="132" y="132" width="36" height="36" rx="8" />
+      <rect class="body-core" x="140" y="140" width="20" height="20" rx="4" />
+      <rect class="stand-clamp" x="136" y="164" width="28" height="10" rx="2" />
+      <polygon class="nose" points="150,104 143,122 157,122" />
+      <line class="nose-stem" x1="150" y1="122" x2="150" y2="132" />
     </g>
     <g id="quad-motors"></g>
   </svg>
@@ -71,22 +78,46 @@ _SCHEMATIC_CSS = """
   stroke: #e2e8f0;
   stroke-width: 1;
 }
-.mount-bracket {
-  fill: #cbd5e0;
+.stand-base {
+  fill: #e2e8f0;
+  stroke: #cbd5e0;
+  stroke-width: 1;
 }
-.mount-post {
+.stand-post {
+  fill: #cbd5e0;
+  stroke: #a0aec0;
+  stroke-width: 1;
+}
+.stand-clamp {
   fill: #a0aec0;
 }
 .arm {
   stroke: #718096;
-  stroke-width: 3;
+  stroke-width: 4;
   stroke-linecap: round;
+}
+.motor-pad {
+  fill: #4a5568;
+  stroke: #2d3748;
+  stroke-width: 1;
 }
 .body {
   fill: #4a5568;
+  stroke: #2d3748;
+  stroke-width: 1.5;
+}
+.body-core {
+  fill: #2d3748;
 }
 .nose {
-  fill: #a0aec0;
+  fill: #718096;
+  stroke: #4a5568;
+  stroke-width: 1;
+}
+.nose-stem {
+  stroke: #718096;
+  stroke-width: 2;
+  stroke-linecap: round;
 }
 .motor-label {
   font-family: system-ui, -apple-system, sans-serif;
@@ -101,8 +132,12 @@ _SCHEMATIC_CSS = """
   stroke-width: 2;
 }
 .prop-blades {
-  stroke-width: 2.5;
+  stroke-width: 2;
   stroke-linecap: round;
+  opacity: 0.9;
+}
+.prop-hub {
+  pointer-events: none;
 }
 .prop-blur-disc {
   opacity: 0.35;
@@ -165,16 +200,19 @@ function ensureMotorNodes(svg, motors) {{
     group.innerHTML = `
       <g class="prop-spin">
         <circle class="prop-blur-disc" r="18" fill="${{color}}" />
-        <line class="prop-blades" x1="-16" y1="0" x2="16" y2="0" stroke="${{color}}" />
-        <line class="prop-blades" x1="0" y1="-16" x2="0" y2="16" stroke="${{color}}" />
-        <circle class="prop-disc" r="11" fill="${{color}}" stroke="#ffffff" />
+        <line class="prop-blades" x1="-15" y1="-4" x2="15" y2="4" stroke="${{color}}" />
+        <line class="prop-blades" x1="-15" y1="4" x2="15" y2="-4" stroke="${{color}}" />
+        <line class="prop-blades" x1="-4" y1="-15" x2="4" y2="15" stroke="${{color}}" />
+        <line class="prop-blades" x1="4" y1="-15" x2="-4" y2="15" stroke="${{color}}" />
+        <circle class="prop-disc" r="12" fill="${{color}}" stroke="#ffffff" stroke-width="2" />
+        <circle class="prop-hub" r="4" fill="#2d3748" stroke="#ffffff" stroke-width="1" />
       </g>
-      <circle class="stall-ring" r="20" visibility="hidden" />
+      <circle class="stall-ring" r="21" visibility="hidden" />
       <g class="stall-badge-group" visibility="hidden">
         <rect class="stall-badge-bg" x="-18" y="-7" width="36" height="14" rx="4" />
         <text class="stall-badge" y="1">STALLED</text>
       </g>
-      <text class="motor-label" y="30">M${{motor.index}}</text>
+      <text class="motor-label" y="32">M${{motor.index}}</text>
     `;
 
     motorsRoot.appendChild(group);
