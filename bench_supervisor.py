@@ -17,22 +17,36 @@ from simulated_labjack import SimulatedLabJackT7
 
 logger = logging.getLogger(__name__)
 
-RECOVERY_DURATION_S = 6.0
+COMPENSATE_DURATION_S = 1.0
+DESCEND_DURATION_S = 5.0
+TOUCHDOWN_DURATION_S = 2.0
+RECOVERY_DURATION_S = COMPENSATE_DURATION_S + DESCEND_DURATION_S + TOUCHDOWN_DURATION_S
+DESCEND_FRACTION = 0.45
 TICK_INTERVAL_S = 0.1
 
-MOTOR_CMD_ALIASES = ("m1_cmd", "m2_cmd", "m3_cmd", "m4_cmd")
-MOTOR_CURRENT_ALIASES = ("m1_current", "m2_current", "m3_current", "m4_current")
-MOTOR_TACH_ALIASES = ("m1_tach", "m2_tach", "m3_tach", "m4_tach")
+MOTOR_CMD_ALIASES = tuple(f"m{i}_cmd" for i in range(1, NUM_MOTORS + 1))
+MOTOR_CURRENT_ALIASES = tuple(f"m{i}_current" for i in range(1, NUM_MOTORS + 1))
+MOTOR_TACH_ALIASES = tuple(f"m{i}_tach" for i in range(1, NUM_MOTORS + 1))
 
-MOTOR_CMD_PHYSICAL = ("DAC0", "DAC1", "TDAC0", "TDAC1")
-MOTOR_CURRENT_PHYSICAL = tuple(f"AIN{i}" for i in range(4))
-MOTOR_TACH_PHYSICAL = tuple(f"AIN{i}" for i in range(4, 8))
+MOTOR_CMD_PHYSICAL = ("DAC0", "DAC1", "TDAC0", "TDAC1", "TDAC2", "TDAC3", "TDAC4", "TDAC5")
+MOTOR_CURRENT_PHYSICAL = tuple(f"AIN{i}" for i in range(8))
+MOTOR_TACH_PHYSICAL = tuple(f"AIN{i}" for i in range(8, 16))
+
+MOTOR_ANGLES_DEG = {i: (i - 1) * 45 for i in range(1, NUM_MOTORS + 1)}
 
 
 class FlightMode(str, Enum):
     OFF = "off"
     RUNNING = "running"
     RECOVERY_LANDING = "recovery_landing"
+
+
+class RecoveryPhase(str, Enum):
+    NONE = "none"
+    COMPENSATE = "compensate"
+    DESCEND = "descend"
+    TOUCHDOWN = "touchdown"
+    COMPLETE = "complete"
 
 
 @dataclass
@@ -57,7 +71,35 @@ class BenchSnapshot:
     mode: FlightMode
     throttle_pct: float
     motors: list[MotorSnapshot]
+    recovery_phase: RecoveryPhase = RecoveryPhase.NONE
+    recovery_progress: float = 0.0
+    stalled_motor: int | None = None
     events: list[FaultEvent] = field(default_factory=list)
+
+
+def compensation_weights(failed_motor: int) -> dict[int, float]:
+    """Per-motor thrust multipliers for healthy motors after a single failure."""
+    failed_angle = MOTOR_ANGLES_DEG[failed_motor]
+    raw: dict[int, float] = {}
+
+    for motor in range(1, NUM_MOTORS + 1):
+        if motor == failed_motor:
+            continue
+        diff = abs(MOTOR_ANGLES_DEG[motor] - failed_angle)
+        diff = min(diff, 360 - diff)
+
+        if diff >= 135:
+            base = 1.22 if diff >= 170 else 1.05
+        elif diff >= 45:
+            base = 1.08
+        else:
+            base = 1.15 if motor % 2 == 0 else 1.10
+
+        raw[motor] = base
+
+    total = sum(raw.values())
+    scale = NUM_MOTORS / total
+    return {motor: weight * scale for motor, weight in raw.items()}
 
 
 class BenchSupervisor:
@@ -72,7 +114,8 @@ class BenchSupervisor:
         self._motors = [MotorSnapshot(index=i + 1) for i in range(NUM_MOTORS)]
         self._events: list[FaultEvent] = []
         self._recovery_started_ns: int | None = None
-        self._recovery_initial_cmds: dict[int, float] = {}
+        self._recovery_base_cmds: dict[int, float] = {}
+        self._compensation_weights: dict[int, float] = {}
         self._stalled_motor: int | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -140,6 +183,38 @@ class BenchSupervisor:
         alias = MOTOR_CMD_ALIASES[motor - 1]
         self._daq.write_analog_value(alias, voltage)
 
+    def _recovery_elapsed_s(self) -> float:
+        assert self._recovery_started_ns is not None
+        return (time.time_ns() - self._recovery_started_ns) * 1e-9
+
+    def _recovery_phase_and_progress(self, elapsed_s: float) -> tuple[RecoveryPhase, float]:
+        if elapsed_s >= RECOVERY_DURATION_S:
+            return RecoveryPhase.COMPLETE, 1.0
+        if elapsed_s < COMPENSATE_DURATION_S:
+            return RecoveryPhase.COMPENSATE, elapsed_s / COMPENSATE_DURATION_S
+        if elapsed_s < COMPENSATE_DURATION_S + DESCEND_DURATION_S:
+            phase_elapsed = elapsed_s - COMPENSATE_DURATION_S
+            return RecoveryPhase.DESCEND, phase_elapsed / DESCEND_DURATION_S
+        phase_elapsed = elapsed_s - COMPENSATE_DURATION_S - DESCEND_DURATION_S
+        return RecoveryPhase.TOUCHDOWN, phase_elapsed / TOUCHDOWN_DURATION_S
+
+    def _compensate_voltage(self, motor: int) -> float:
+        base = self._recovery_base_cmds.get(motor, 0.0)
+        weight = self._compensation_weights.get(motor, 1.0)
+        return min(CMD_VOLTAGE_MAX, base * weight)
+
+    def _healthy_motor_voltage(self, motor: int, phase: RecoveryPhase, phase_progress: float) -> float:
+        compensate_v = self._compensate_voltage(motor)
+        if phase == RecoveryPhase.COMPENSATE:
+            return compensate_v
+        if phase == RecoveryPhase.DESCEND:
+            descend_end = compensate_v * DESCEND_FRACTION
+            return compensate_v + (descend_end - compensate_v) * phase_progress
+        if phase == RecoveryPhase.TOUCHDOWN:
+            descend_end = compensate_v * DESCEND_FRACTION
+            return descend_end * (1.0 - phase_progress)
+        return 0.0
+
     def _tick(self) -> None:
         with self._lock:
             mode = self._mode
@@ -162,17 +237,17 @@ class BenchSupervisor:
             self._check_for_stall()
 
     def _apply_recovery_commands(self) -> None:
-        assert self._recovery_started_ns is not None
-        elapsed_s = (time.time_ns() - self._recovery_started_ns) * 1e-9
-        progress = min(1.0, elapsed_s / RECOVERY_DURATION_S)
-        decay = 1.0 - progress
+        elapsed_s = self._recovery_elapsed_s()
+        phase, phase_progress = self._recovery_phase_and_progress(elapsed_s)
 
         for motor in range(1, NUM_MOTORS + 1):
             if motor == self._stalled_motor:
                 self._write_motor_command(motor, 0.0)
+            elif phase == RecoveryPhase.COMPLETE:
+                self._write_motor_command(motor, 0.0)
             else:
-                initial_v = self._recovery_initial_cmds.get(motor, 0.0)
-                self._write_motor_command(motor, initial_v * decay)
+                voltage = self._healthy_motor_voltage(motor, phase, phase_progress)
+                self._write_motor_command(motor, voltage)
 
     def _channel_value(self, measurement, alias: str) -> float:
         key = f"{self._daq.name}.{alias}"
@@ -209,25 +284,35 @@ class BenchSupervisor:
                 peak_current_a=peak_current_a,
                 message=(
                     f"Motor {motor_idx} stall detected — channel isolated, "
-                    "recovery landing active"
+                    "asymmetric recovery landing active"
                 ),
             )
         )
         self._stalled_motor = motor_idx
         self._mode = FlightMode.RECOVERY_LANDING
         self._recovery_started_ns = now
-        self._recovery_initial_cmds = {
-            m.index: self._throttle_to_voltage(self._throttle_pct)
-            for m in self._motors
-            if m.index != motor_idx
+        hover_v = self._throttle_to_voltage(self._throttle_pct)
+        self._recovery_base_cmds = {
+            m.index: hover_v for m in self._motors if m.index != motor_idx
         }
+        self._compensation_weights = compensation_weights(motor_idx)
         logger.warning("Stall on motor %d (%.1f A). Entering recovery landing.", motor_idx, peak_current_a)
+
+    def _snapshot_recovery(self) -> tuple[RecoveryPhase, float]:
+        if self._mode != FlightMode.RECOVERY_LANDING or self._recovery_started_ns is None:
+            return RecoveryPhase.NONE, 0.0
+        elapsed_s = self._recovery_elapsed_s()
+        return self._recovery_phase_and_progress(elapsed_s)
 
     def snapshot(self) -> BenchSnapshot:
         with self._lock:
+            recovery_phase, recovery_progress = self._snapshot_recovery()
             return BenchSnapshot(
                 mode=self._mode,
                 throttle_pct=self._throttle_pct,
+                recovery_phase=recovery_phase,
+                recovery_progress=recovery_progress,
+                stalled_motor=self._stalled_motor,
                 motors=[
                     MotorSnapshot(
                         index=m.index,
@@ -253,7 +338,8 @@ class BenchSupervisor:
             self._events.clear()
             self._recovery_started_ns = None
             self._stalled_motor = None
-            self._recovery_initial_cmds.clear()
+            self._recovery_base_cmds.clear()
+            self._compensation_weights.clear()
             for motor in self._motors:
                 motor.enabled = True
                 motor.stalled = False
@@ -271,7 +357,8 @@ class BenchSupervisor:
             self._throttle_pct = 0.0
             self._recovery_started_ns = None
             self._stalled_motor = None
-            self._recovery_initial_cmds.clear()
+            self._recovery_base_cmds.clear()
+            self._compensation_weights.clear()
             for motor in self._motors:
                 motor.enabled = True
                 motor.stalled = False

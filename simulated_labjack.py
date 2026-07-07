@@ -1,4 +1,4 @@
-"""Simulated LabJack T7 + LJTick-DAC driver for instro InstroDAQ demos."""
+"""Simulated LabJack T7 + 3× LJTick-DAC + analog mux for instro InstroDAQ demos."""
 
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ from instro.lib.types import Measurement
 from drone_physics import CMD_VOLTAGE_MAX, DronePhysics, NUM_MOTORS
 
 BUILTIN_AO = frozenset({"DAC0", "DAC1"})
-TICK_DAC_AO = frozenset({"TDAC0", "TDAC1"})
+TICK_DAC_AO = frozenset(f"TDAC{i}" for i in range(6))
 VALID_AO = BUILTIN_AO | TICK_DAC_AO
-VALID_AI = frozenset(f"AIN{i}" for i in range(8))
+VALID_AI = frozenset(f"AIN{i}" for i in range(16))
 
-MOTOR_CMD_CHANNELS = ("DAC0", "DAC1", "TDAC0", "TDAC1")
-CURRENT_SENSE_CHANNELS = tuple(f"AIN{i}" for i in range(4))
-TACH_CHANNELS = tuple(f"AIN{i}" for i in range(4, 8))
+MOTOR_CMD_CHANNELS = ("DAC0", "DAC1", "TDAC0", "TDAC1", "TDAC2", "TDAC3", "TDAC4", "TDAC5")
+CURRENT_SENSE_CHANNELS = tuple(f"AIN{i}" for i in range(8))
+TACH_CHANNELS = tuple(f"AIN{i}" for i in range(8, 16))
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,7 @@ class AnalogReadResponse:
 
 
 class SimulatedLabJackT7(DAQDriverBase):
-    """LabJack T7 with one LJTick-DAC — same driver interface as production code."""
+    """LabJack T7 with three LJTick-DAC boards and analog mux — same driver interface as production code."""
 
     def __init__(self, device_id: str = "470010000") -> None:
         super().__init__()

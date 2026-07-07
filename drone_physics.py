@@ -1,11 +1,11 @@
-"""Quad-motor drone plant model for the simulated LabJack bench."""
+"""Octocopter motor plant model for the simulated LabJack bench."""
 
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
 
-NUM_MOTORS = 4
+NUM_MOTORS = 8
 STALL_CURRENT_A = 6.0
 MOTOR_RESPONSE_RATE = 0.25
 SPEED_ZERO_THRESHOLD_PCT = 0.01
