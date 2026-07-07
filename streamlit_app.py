@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from bench_supervisor import BenchSupervisor, FlightMode
+from quadcopter_schematic import render_quadcopter_schematic
 
 MOTOR_MAX_RPM = 10_000.0
 
@@ -253,7 +254,11 @@ def render_motor_data(snap) -> None:
         else:
             st.success(f"Systems running — throttle {snap.throttle_pct:.0f}%")
 
-    render_motor_rpm_chart(snap.motors)
+    chart_col, schematic_col = st.columns([3, 2])
+    with chart_col:
+        render_motor_rpm_chart(snap.motors)
+    with schematic_col:
+        render_quadcopter_schematic(snap.motors, snap.mode)
 
     max_rpm = max((speed_pct_to_rpm(m.speed_pct) for m in snap.motors), default=0.0)
     if max_rpm > MOTOR_MAX_RPM * 0.8:
