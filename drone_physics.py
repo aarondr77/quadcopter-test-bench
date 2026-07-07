@@ -82,8 +82,11 @@ class DronePhysics:
                 if motor.index in stalled_this_step:
                     continue
 
-                target_pct = (motor.command_v / CMD_VOLTAGE_MAX) * 100.0
-                motor.speed_pct += (target_pct - motor.speed_pct) * MOTOR_RESPONSE_RATE
+                if motor.command_v <= 0.0:
+                    motor.speed_pct = 0.0
+                else:
+                    target_pct = (motor.command_v / CMD_VOLTAGE_MAX) * 100.0
+                    motor.speed_pct += (target_pct - motor.speed_pct) * MOTOR_RESPONSE_RATE
                 motor.current_a = 0.15 + 0.045 * motor.speed_pct
 
             return [
