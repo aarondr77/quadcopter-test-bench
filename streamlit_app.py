@@ -56,6 +56,12 @@ def inject_control_styles() -> None:
             font-weight: 600;
             border-radius: 10px;
         }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3)
+        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stButton"] > button {
+            aspect-ratio: 1;
+            min-height: 4rem;
+            padding: 0.5rem;
+        }
         .motor-metric-card {
             background: #ffffff;
             border: 1px solid #e2e8f0;
@@ -196,14 +202,29 @@ def render_controls(snap, bench: BenchSupervisor) -> None:
     with fault_col:
         with st.container(border=True):
             st.markdown('<div class="control-card-title">Fault Injection</div>', unsafe_allow_html=True)
-            if st.button(
-                "Inject Stall on Motor 1",
-                disabled=snap.mode != FlightMode.RUNNING,
-                use_container_width=True,
-                key="inject_stall",
-            ):
-                bench.inject_stall(1)
-                st.rerun()
+            fault_disabled = snap.mode != FlightMode.RUNNING
+            top_row = st.columns(2)
+            bottom_row = st.columns(2)
+            for col, motor_idx in zip(top_row, (1, 2)):
+                with col:
+                    if st.button(
+                        f"M{motor_idx}",
+                        disabled=fault_disabled,
+                        use_container_width=True,
+                        key=f"inject_stall_m{motor_idx}",
+                    ):
+                        bench.inject_stall(motor_idx)
+                        st.rerun()
+            for col, motor_idx in zip(bottom_row, (3, 4)):
+                with col:
+                    if st.button(
+                        f"M{motor_idx}",
+                        disabled=fault_disabled,
+                        use_container_width=True,
+                        key=f"inject_stall_m{motor_idx}",
+                    ):
+                        bench.inject_stall(motor_idx)
+                        st.rerun()
 
 
 @st.fragment(run_every=0.15)

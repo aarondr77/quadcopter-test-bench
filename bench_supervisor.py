@@ -284,7 +284,10 @@ class BenchSupervisor:
                 self._throttle_pct = max(0.0, min(100.0, throttle_pct))
 
     def inject_stall(self, motor: int) -> None:
+        if not 1 <= motor <= NUM_MOTORS:
+            raise ValueError(f"motor must be 1..{NUM_MOTORS}, got {motor}")
         with self._lock:
             if self._mode != FlightMode.RUNNING:
                 return
-        self._driver.inject_stall(motor)
+            peak_current_a = max(self._motors[motor - 1].current_a, STALL_CURRENT_A)
+        self._enter_recovery(motor, peak_current_a, time.time_ns())
