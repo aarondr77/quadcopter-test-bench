@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import time
 
-import pandas as pd
 import streamlit as st
 
-from bench_supervisor import BenchSnapshot, BenchSupervisor, FlightMode
+from bench_supervisor import BenchSupervisor, FlightMode
 
 MOTOR_MAX_RPM = 10_000.0
-SPEED_HISTORY_LIMIT = 300
 
 MOTOR_COLORS = {
     1: "#1f77b4",
@@ -84,25 +82,6 @@ def inject_control_styles() -> None:
     )
 
 
-def reset_speed_history() -> None:
-    st.session_state.speed_history = []
-    st.session_state.session_start = time.time()
-
-
-def append_speed_sample(snap: BenchSnapshot) -> None:
-    if "speed_history" not in st.session_state:
-        reset_speed_history()
-
-    elapsed = time.time() - st.session_state.session_start
-    point: dict[str, float] = {"Time (s)": round(elapsed, 2)}
-    for motor in snap.motors:
-        point[f"M{motor.index}"] = speed_pct_to_rpm(motor.speed_pct)
-
-    st.session_state.speed_history.append(point)
-    if len(st.session_state.speed_history) > SPEED_HISTORY_LIMIT:
-        st.session_state.speed_history = st.session_state.speed_history[-SPEED_HISTORY_LIMIT:]
-
-
 def render_event_log(events: list) -> None:
     if not events:
         return
@@ -134,7 +113,7 @@ def render_motor_metric(motor_idx: int, speed_rpm: float, current_a: float, stal
     )
 
 
-def render_controls(snap: BenchSnapshot, bench: BenchSupervisor) -> None:
+def render_controls(snap, bench: BenchSupervisor) -> None:
     st.markdown("### Controls")
 
     power_col, throttle_col, fault_col = st.columns(3)
@@ -144,12 +123,10 @@ def render_controls(snap: BenchSnapshot, bench: BenchSupervisor) -> None:
             st.markdown('<div class="control-card-title">Power On / Off</div>', unsafe_allow_html=True)
             if snap.mode == FlightMode.OFF:
                 if st.button("Power On", type="primary", use_container_width=True, key="power_on"):
-                    reset_speed_history()
                     bench.power_on()
                     st.rerun()
             else:
                 if st.button("Power Off", use_container_width=True, key="power_off"):
-                    reset_speed_history()
                     bench.power_off()
                     st.rerun()
 
@@ -197,11 +174,11 @@ def live_motor_data() -> None:
         st.info("Power on the bench to stream motor speed data.")
         return
 
-    append_speed_sample(snap)
-
     st.subheader("Motor speed (RPM)")
-    history_df = pd.DataFrame(st.session_state.speed_history).set_index("Time (s)")
-    st.line_chart(history_df, height=380, use_container_width=True)
+    st.bar_chart(
+        {f"M{motor.index}": speed_pct_to_rpm(motor.speed_pct) for motor in snap.motors},
+        height=320,
+    )
 
     st.caption(f"Live tachometer readings — 0 to {MOTOR_MAX_RPM:,.0f} RPM full scale")
 
