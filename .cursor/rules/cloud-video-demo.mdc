@@ -1,0 +1,14 @@
+---
+description: Require a screen-recording demo for bench UI and behavior changes
+globs: "{streamlit_app.py,bench_supervisor.py,drone_physics.py,simulated_labjack.py,**/*.py}"
+alwaysApply: true
+---
+
+For any change to the Drone Motor Bench (UI, supervisor logic, physics, or simulated DAQ):
+
+1. Use the Streamlit dev server (see AGENTS.md and `.cursor/environment.json` terminals).
+2. Open http://localhost:8501 in the browser and run the **Visual verification demo script** in AGENTS.md end-to-end.
+3. **Record a short screen recording** of the full demo flow before marking the task complete.
+4. Attach the recording (and at least one screenshot of the final recovery state) as artifacts in the agent summary and PR when applicable.
+
+Do not consider UI or behavior changes complete without visual proof that the bench still works.
