@@ -99,7 +99,6 @@ def render_motor_rpm_chart(motors: list) -> None:
     motor_labels = [f"M{m.index}" for m in motors]
     rpm_values = [speed_pct_to_rpm(m.speed_pct) for m in motors]
     max_rpm = max(rpm_values, default=0.0)
-    # Keep full-scale at high throttle; zoom in when readings are small so bars stay visible.
     if max_rpm > MOTOR_MAX_RPM * 0.8:
         y_max = MOTOR_MAX_RPM
     else:
@@ -166,26 +165,30 @@ def render_controls(snap, bench: BenchSupervisor) -> None:
             if snap.mode == FlightMode.OFF:
                 if st.button("Power On", type="primary", use_container_width=True, key="power_on"):
                     bench.power_on()
+                    st.session_state.pop("throttle_input", None)
                     st.rerun()
             else:
                 if st.button("Power Off", use_container_width=True, key="power_off"):
                     bench.power_off()
+                    st.session_state.pop("throttle_input", None)
                     st.rerun()
                 if snap.mode == FlightMode.RECOVERY_LANDING and recovery_landing_complete(snap.motors):
                     if st.button("Start New Preflight", type="primary", use_container_width=True, key="new_preflight"):
                         bench.power_off()
                         bench.power_on()
+                        st.session_state.pop("throttle_input", None)
                         st.rerun()
 
     with throttle_col:
         with st.container(border=True):
             st.markdown('<div class="control-card-title">Motor Throttle %</div>', unsafe_allow_html=True)
             if snap.mode == FlightMode.RUNNING:
+                if "throttle_input" not in st.session_state:
+                    st.session_state.throttle_input = int(snap.throttle_pct)
                 st.number_input(
                     "Throttle",
                     min_value=0,
                     max_value=100,
-                    value=int(snap.throttle_pct),
                     key="throttle_input",
                     label_visibility="collapsed",
                     on_change=lambda: get_bench().set_throttle(float(st.session_state.throttle_input)),
@@ -228,10 +231,7 @@ def render_controls(snap, bench: BenchSupervisor) -> None:
                         st.rerun()
 
 
-@st.fragment(run_every=0.15)
-def live_motor_data() -> None:
-    snap = get_bench().snapshot()
-
+def render_motor_data(snap) -> None:
     if snap.mode == FlightMode.OFF:
         st.info("Power on the bench to stream motor speed data.")
         return
@@ -274,6 +274,25 @@ def live_motor_data() -> None:
             )
 
 
+@st.fragment
+def bench_controls() -> None:
+    """Interactive controls — isolated so they never trigger full-app reruns."""
+    bench = get_bench()
+    snap = bench.snapshot()
+    render_controls(snap, bench)
+
+    if snap.events:
+        with st.expander("Event log", expanded=False):
+            render_event_log(snap.events)
+
+
+@st.fragment(run_every=0.15)
+def live_motor_data() -> None:
+    """Read-only telemetry with auto-refresh (no widgets — safe with run_every)."""
+    snap = get_bench().snapshot()
+    render_motor_data(snap)
+
+
 def main() -> None:
     st.set_page_config(page_title="Drone Motor Bench", page_icon="🛸", layout="wide")
     inject_control_styles()
@@ -284,18 +303,11 @@ def main() -> None:
         "(simulated LabJack T7 + LJTick-DAC)"
     )
 
-    bench = get_bench()
-    snap = bench.snapshot()
-
-    render_controls(snap, bench)
+    bench_controls()
 
     st.divider()
     st.subheader("Motor data")
     live_motor_data()
-
-    if snap.events:
-        with st.expander("Event log", expanded=False):
-            render_event_log(snap.events)
 
     st.divider()
     st.subheader("Nominal Instro")
