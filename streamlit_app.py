@@ -6,7 +6,7 @@ import time
 
 import streamlit as st
 
-from drone_motor_bench import DroneMotorBench, FlightMode
+from bench_supervisor import BenchSupervisor, FlightMode
 
 MODE_LABELS = {
     FlightMode.OFF: "OFF",
@@ -16,11 +16,8 @@ MODE_LABELS = {
 
 
 @st.cache_resource
-def get_bench() -> DroneMotorBench:
-    bench = DroneMotorBench(name="drone_bench")
-    bench.open()
-    bench.start()
-    return bench
+def get_bench() -> BenchSupervisor:
+    return BenchSupervisor(name="drone_bench")
 
 
 def render_motor_panel(motor_idx: int, speed_pct: float, current_a: float, stalled: bool, enabled: bool) -> None:
@@ -51,10 +48,30 @@ def main() -> None:
     st.set_page_config(page_title="Drone Motor Bench", page_icon="🛸", layout="wide")
 
     st.title("Drone Motor Bench")
-    st.caption("Preflight power check — stall detection and autonomous recovery landing (simulated)")
+    st.caption(
+        "Preflight power check via InstroDAQ — stall detection and autonomous recovery landing "
+        "(simulated LabJack T7 + LJTick-DAC)"
+    )
 
     bench = get_bench()
     snap = bench.snapshot()
+
+    with st.expander("How this uses instro"):
+        st.code(
+            """from instro.daq import InstroDAQ
+from simulated_labjack import SimulatedLabJackT7
+# from instro.daq.drivers.labjack import LabJackTSeriesDriver  # real bench
+
+driver = SimulatedLabJackT7(device_id="470010000")
+# driver = LabJackTSeriesDriver(device_id="470010000")  # swap for hardware
+
+daq = InstroDAQ(name="drone_bench", driver=driver)
+daq.open()
+daq.configure_analog_channel(Direction.OUTPUT, "DAC0", alias="m1_cmd", range_min=0, range_max=5)
+daq.write_analog_value("m1_cmd", 3.5)
+measurement = daq.read_analog()  # reads m1_current, m1_tach, ...""",
+            language="python",
+        )
 
     col_controls, col_live = st.columns([1, 2])
 
@@ -99,8 +116,8 @@ def main() -> None:
             st.rerun()
 
         st.caption(
-            "Simulates a prop stall on M1. The bench logs the fault, cuts power to that "
-            "motor, and ramps the others down in recovery landing mode."
+            "Simulates a prop stall on M1. The supervisor detects it from current readings, "
+            "cuts command voltage to that motor, and ramps the others down in recovery landing mode."
         )
 
         st.divider()
