@@ -68,6 +68,7 @@ def inject_control_styles() -> None:
             border: 1px solid #e2e8f0;
             border-radius: 10px;
             padding: 0.85rem 1rem;
+            margin-bottom: 1.25rem;
         }
         .motor-metric-title {
             font-size: 0.85rem;
@@ -253,7 +254,6 @@ def live_motor_data() -> None:
         else:
             st.success(f"Systems running — throttle {snap.throttle_pct:.0f}%")
 
-    st.subheader("Motor speed (RPM)")
     chart_col, schematic_col = st.columns([3, 2])
     with chart_col:
         render_motor_rpm_chart(snap.motors)
@@ -302,6 +302,8 @@ def main() -> None:
         with st.expander("Event log", expanded=False):
             render_event_log(snap.events)
 
+    st.divider()
+    st.subheader("Nominal Instro")
     with st.expander("How this uses instro"):
         st.code(
             """from instro.daq import InstroDAQ
