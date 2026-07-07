@@ -1,0 +1,21 @@
+{
+  "name": "quadcopter-test-bench",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "install": "python3 -m venv .venv\n.venv/bin/pip install -r requirements.txt",
+  "ports": [
+    {
+      "port": 8501,
+      "name": "streamlit"
+    }
+  ],
+  "terminals": [
+    {
+      "name": "streamlit",
+      "command": ".venv/bin/streamlit run streamlit_app.py --server.port 8501 --server.headless true --server.address 0.0.0.0",
+      "description": "Drone Motor Bench Streamlit UI — open http://localhost:8501 for visual demos"
+    }
+  ]
+}
