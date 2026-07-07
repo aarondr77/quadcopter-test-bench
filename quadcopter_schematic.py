@@ -35,10 +35,6 @@ _SCHEMATIC_HTML = """
       </filter>
     </defs>
     <rect class="quad-bg" x="0" y="0" width="300" height="300" rx="12" />
-    <g id="quad-stand">
-      <rect class="stand-base" x="108" y="254" width="84" height="7" rx="2" />
-      <rect class="stand-post" x="147" y="174" width="6" height="82" rx="2" />
-    </g>
     <g id="quad-frame">
       <line class="arm" x1="150" y1="150" x2="78" y2="78" />
       <line class="arm" x1="150" y1="150" x2="78" y2="222" />
@@ -50,7 +46,6 @@ _SCHEMATIC_HTML = """
       <circle class="motor-pad" cx="222" cy="78" r="7" />
       <rect class="body" x="132" y="132" width="36" height="36" rx="8" />
       <rect class="body-core" x="140" y="140" width="20" height="20" rx="4" />
-      <rect class="stand-clamp" x="136" y="164" width="28" height="10" rx="2" />
       <polygon class="nose" points="150,104 143,122 157,122" />
       <line class="nose-stem" x1="150" y1="122" x2="150" y2="132" />
     </g>
@@ -77,19 +72,6 @@ _SCHEMATIC_CSS = """
   fill: #ffffff;
   stroke: #e2e8f0;
   stroke-width: 1;
-}
-.stand-base {
-  fill: #e2e8f0;
-  stroke: #cbd5e0;
-  stroke-width: 1;
-}
-.stand-post {
-  fill: #cbd5e0;
-  stroke: #a0aec0;
-  stroke-width: 1;
-}
-.stand-clamp {
-  fill: #a0aec0;
 }
 .arm {
   stroke: #718096;
