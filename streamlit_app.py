@@ -9,12 +9,6 @@ import streamlit as st
 
 from bench_supervisor import BenchSnapshot, BenchSupervisor, FlightMode
 
-MODE_LABELS = {
-    FlightMode.OFF: "OFF",
-    FlightMode.RUNNING: "RUNNING",
-    FlightMode.RECOVERY_LANDING: "RECOVERY LANDING",
-}
-
 MOTOR_MAX_RPM = 10_000.0
 SPEED_HISTORY_LIMIT = 300
 
@@ -39,31 +33,16 @@ def inject_control_styles() -> None:
     st.markdown(
         """
         <style>
-        .control-section {
-            background: linear-gradient(180deg, #f8f9fb 0%, #eef1f6 100%);
-            border: 1px solid #dde2ea;
-            border-radius: 14px;
-            padding: 1.25rem 1.5rem 1.5rem;
-            margin-bottom: 1.25rem;
-        }
-        .control-section h3 {
-            margin: 0 0 1rem 0;
-            font-size: 1.1rem;
-            letter-spacing: 0.02em;
-            text-transform: uppercase;
-            color: #4a5568;
-        }
-        .control-card-label {
+        .control-card-title {
             font-size: 0.95rem;
             font-weight: 600;
             color: #2d3748;
-            margin-bottom: 0.5rem;
+            text-align: center;
+            margin-bottom: 0.75rem;
         }
-        .control-card-hint {
-            font-size: 0.8rem;
-            color: #718096;
-            margin-top: 0.5rem;
-            line-height: 1.4;
+        div[data-testid="stHorizontalBlock"] div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: #ffffff;
+            min-height: 9rem;
         }
         div[data-testid="stHorizontalBlock"] div[data-testid="column"] .stButton > button {
             min-height: 3.25rem;
@@ -71,9 +50,11 @@ def inject_control_styles() -> None:
             font-weight: 600;
             border-radius: 10px;
         }
-        div[data-testid="stHorizontalBlock"] div[data-testid="column"] .stSlider label {
-            font-size: 0.95rem;
+        div[data-testid="stHorizontalBlock"] div[data-testid="column"] .stNumberInput input {
+            min-height: 3.25rem;
+            font-size: 1.05rem;
             font-weight: 600;
+            border-radius: 10px;
         }
         .motor-metric-card {
             background: #ffffff;
@@ -154,89 +135,58 @@ def render_motor_metric(motor_idx: int, speed_rpm: float, current_a: float, stal
 
 
 def render_controls(snap: BenchSnapshot, bench: BenchSupervisor) -> None:
-    st.markdown('<div class="control-section">', unsafe_allow_html=True)
     st.markdown("### Controls")
 
     power_col, throttle_col, fault_col = st.columns(3)
 
     with power_col:
-        st.markdown('<div class="control-card-label">Power On / Off</div>', unsafe_allow_html=True)
-        if snap.mode == FlightMode.OFF:
-            if st.button("Power On", type="primary", use_container_width=True, key="power_on"):
-                reset_speed_history()
-                bench.power_on()
-                st.rerun()
-        else:
-            if st.button("Power Off", use_container_width=True, key="power_off"):
-                reset_speed_history()
-                bench.power_off()
-                st.rerun()
-        st.markdown(
-            '<div class="control-card-hint">Start or stop the bench preflight check.</div>',
-            unsafe_allow_html=True,
-        )
+        with st.container(border=True):
+            st.markdown('<div class="control-card-title">Power On / Off</div>', unsafe_allow_html=True)
+            if snap.mode == FlightMode.OFF:
+                if st.button("Power On", type="primary", use_container_width=True, key="power_on"):
+                    reset_speed_history()
+                    bench.power_on()
+                    st.rerun()
+            else:
+                if st.button("Power Off", use_container_width=True, key="power_off"):
+                    reset_speed_history()
+                    bench.power_off()
+                    st.rerun()
 
     with throttle_col:
-        st.markdown('<div class="control-card-label">Motor Throttle Percentage</div>', unsafe_allow_html=True)
-        if snap.mode == FlightMode.RUNNING:
-            st.slider(
-                "Throttle",
-                min_value=0,
-                max_value=100,
-                value=int(snap.throttle_pct),
-                key="throttle_slider",
-                label_visibility="collapsed",
-                on_change=lambda: get_bench().set_throttle(float(st.session_state.throttle_slider)),
-            )
-            st.markdown(
-                f'<div class="control-card-hint">Command output: **{snap.throttle_pct:.0f}%**</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.slider(
-                "Throttle",
-                min_value=0,
-                max_value=100,
-                value=int(snap.throttle_pct),
-                disabled=True,
-                label_visibility="collapsed",
-            )
-            st.markdown(
-                '<div class="control-card-hint">Power on the bench to adjust throttle.</div>',
-                unsafe_allow_html=True,
-            )
+        with st.container(border=True):
+            st.markdown('<div class="control-card-title">Motor Throttle %</div>', unsafe_allow_html=True)
+            if snap.mode == FlightMode.RUNNING:
+                st.number_input(
+                    "Throttle",
+                    min_value=0,
+                    max_value=100,
+                    value=int(snap.throttle_pct),
+                    key="throttle_input",
+                    label_visibility="collapsed",
+                    on_change=lambda: get_bench().set_throttle(float(st.session_state.throttle_input)),
+                )
+            else:
+                st.number_input(
+                    "Throttle",
+                    min_value=0,
+                    max_value=100,
+                    value=int(snap.throttle_pct),
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
 
     with fault_col:
-        st.markdown('<div class="control-card-label">Fault Injection</div>', unsafe_allow_html=True)
-        if st.button(
-            "Inject Stall on Motor 1",
-            disabled=snap.mode != FlightMode.RUNNING,
-            use_container_width=True,
-            key="inject_stall",
-        ):
-            bench.inject_stall(1)
-            st.rerun()
-        st.markdown(
-            '<div class="control-card-hint">Simulates a prop stall. Supervisor isolates the channel and enters recovery landing.</div>',
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def render_status_strip(snap: BenchSnapshot) -> None:
-    status_cols = st.columns([1, 1, 2])
-    with status_cols[0]:
-        st.metric("Flight mode", MODE_LABELS[snap.mode])
-    with status_cols[1]:
-        st.metric("Throttle", f"{snap.throttle_pct:.0f}%")
-    with status_cols[2]:
-        if snap.mode == FlightMode.RECOVERY_LANDING:
-            st.error("Motor stall detected — fault logged, stalled channel isolated, recovery landing active")
-        elif snap.mode == FlightMode.RUNNING:
-            st.success("Systems running")
-        else:
-            st.info("Bench is powered off")
+        with st.container(border=True):
+            st.markdown('<div class="control-card-title">Fault Injection</div>', unsafe_allow_html=True)
+            if st.button(
+                "Inject Stall on Motor 1",
+                disabled=snap.mode != FlightMode.RUNNING,
+                use_container_width=True,
+                key="inject_stall",
+            ):
+                bench.inject_stall(1)
+                st.rerun()
 
 
 @st.fragment(run_every=0.15)
@@ -281,7 +231,6 @@ def main() -> None:
     snap = bench.snapshot()
 
     render_controls(snap, bench)
-    render_status_strip(snap)
 
     st.divider()
     st.subheader("Motor data")
