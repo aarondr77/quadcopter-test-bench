@@ -89,25 +89,32 @@ def recovery_landing_complete(motors: list) -> bool:
 
 
 def render_motor_rpm_chart(motors: list) -> None:
-    chart_df = pd.DataFrame(
-        {
-            "Motor": [f"M{m.index}" for m in motors],
-            "RPM": [speed_pct_to_rpm(m.speed_pct) for m in motors],
-            "Color": [MOTOR_COLORS[m.index] for m in motors],
-        }
-    )
+    motor_labels = [f"M{m.index}" for m in motors]
+    rpm_values = [speed_pct_to_rpm(m.speed_pct) for m in motors]
+    max_rpm = max(rpm_values, default=0.0)
+    # Keep full-scale at high throttle; zoom in when readings are small so bars stay visible.
+    if max_rpm > MOTOR_MAX_RPM * 0.8:
+        y_max = MOTOR_MAX_RPM
+    else:
+        y_max = min(MOTOR_MAX_RPM, max(1_000.0, max_rpm * 1.2))
+
+    chart_df = pd.DataFrame({"Motor": motor_labels, "RPM": rpm_values})
     chart = (
         alt.Chart(chart_df)
         .mark_bar()
         .encode(
-            x=alt.X("Motor:N", sort=None, title=None),
-            y=alt.Y("RPM:Q", scale=alt.Scale(domain=[0, MOTOR_MAX_RPM]), title="RPM"),
-            color=alt.Color("Motor:N", scale=alt.Scale(domain=list(MOTOR_COLORS), range=list(MOTOR_COLORS.values())), legend=None),
+            x=alt.X("Motor:N", sort=motor_labels, title=None),
+            y=alt.Y("RPM:Q", scale=alt.Scale(domain=[0, y_max]), title="RPM"),
+            color=alt.Color(
+                "Motor:N",
+                scale=alt.Scale(domain=motor_labels, range=[MOTOR_COLORS[m.index] for m in motors]),
+                legend=None,
+            ),
             tooltip=["Motor", alt.Tooltip("RPM", format=",.0f")],
         )
         .properties(height=320)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def render_event_log(events: list) -> None:
@@ -227,7 +234,12 @@ def live_motor_data() -> None:
     st.subheader("Motor speed (RPM)")
     render_motor_rpm_chart(snap.motors)
 
-    st.caption(f"Live tachometer readings — 0 to {MOTOR_MAX_RPM:,.0f} RPM full scale")
+    max_rpm = max((speed_pct_to_rpm(m.speed_pct) for m in snap.motors), default=0.0)
+    if max_rpm > MOTOR_MAX_RPM * 0.8:
+        scale_note = f"0 to {MOTOR_MAX_RPM:,.0f} RPM full scale"
+    else:
+        scale_note = f"Auto-scaled for visibility (full scale 0 to {MOTOR_MAX_RPM:,.0f} RPM)"
+    st.caption(f"Live tachometer readings — {scale_note}")
 
     metric_cols = st.columns(4)
     for col, motor in zip(metric_cols, snap.motors):
