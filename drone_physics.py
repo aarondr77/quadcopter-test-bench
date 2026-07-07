@@ -8,6 +8,7 @@ from dataclasses import dataclass
 NUM_MOTORS = 4
 STALL_CURRENT_A = 6.0
 MOTOR_RESPONSE_RATE = 0.25
+SPEED_ZERO_THRESHOLD_PCT = 0.01
 CMD_VOLTAGE_MAX = 5.0
 CURRENT_SENSE_V_PER_A = 0.1  # 100 mV/A shunt amplifier output
 
@@ -82,10 +83,12 @@ class DronePhysics:
                 if motor.index in stalled_this_step:
                     continue
 
-                if motor.command_v <= 0.0:
+                target_pct = (motor.command_v / CMD_VOLTAGE_MAX) * 100.0
+                if motor.command_v <= 0.0 or (
+                    target_pct < SPEED_ZERO_THRESHOLD_PCT and motor.speed_pct < SPEED_ZERO_THRESHOLD_PCT
+                ):
                     motor.speed_pct = 0.0
                 else:
-                    target_pct = (motor.command_v / CMD_VOLTAGE_MAX) * 100.0
                     motor.speed_pct += (target_pct - motor.speed_pct) * MOTOR_RESPONSE_RATE
                 motor.current_a = 0.15 + 0.045 * motor.speed_pct
 
