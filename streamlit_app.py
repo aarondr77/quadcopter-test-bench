@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 
 from bench_supervisor import BenchSupervisor, FlightMode
@@ -82,6 +84,32 @@ def inject_control_styles() -> None:
     )
 
 
+def recovery_landing_complete(motors: list) -> bool:
+    return all(m.speed_pct <= 0.01 for m in motors if not m.stalled)
+
+
+def render_motor_rpm_chart(motors: list) -> None:
+    chart_df = pd.DataFrame(
+        {
+            "Motor": [f"M{m.index}" for m in motors],
+            "RPM": [speed_pct_to_rpm(m.speed_pct) for m in motors],
+            "Color": [MOTOR_COLORS[m.index] for m in motors],
+        }
+    )
+    chart = (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("Motor:N", sort=None, title=None),
+            y=alt.Y("RPM:Q", scale=alt.Scale(domain=[0, MOTOR_MAX_RPM]), title="RPM"),
+            color=alt.Color("Motor:N", scale=alt.Scale(domain=list(MOTOR_COLORS), range=list(MOTOR_COLORS.values())), legend=None),
+            tooltip=["Motor", alt.Tooltip("RPM", format=",.0f")],
+        )
+        .properties(height=320)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 def render_event_log(events: list) -> None:
     if not events:
         return
@@ -129,6 +157,11 @@ def render_controls(snap, bench: BenchSupervisor) -> None:
                 if st.button("Power Off", use_container_width=True, key="power_off"):
                     bench.power_off()
                     st.rerun()
+                if snap.mode == FlightMode.RECOVERY_LANDING and recovery_landing_complete(snap.motors):
+                    if st.button("Start New Preflight", type="primary", use_container_width=True, key="new_preflight"):
+                        bench.power_off()
+                        bench.power_on()
+                        st.rerun()
 
     with throttle_col:
         with st.container(border=True):
@@ -174,11 +207,25 @@ def live_motor_data() -> None:
         st.info("Power on the bench to stream motor speed data.")
         return
 
+    if snap.mode == FlightMode.RECOVERY_LANDING:
+        if recovery_landing_complete(snap.motors):
+            st.success(
+                "Safe landing complete — all motors stopped. "
+                "Use **Start New Preflight** to run another test."
+            )
+        else:
+            st.warning(
+                "Motor stall detected — fault logged, stalled channel isolated, "
+                "recovery landing in progress (ramping motors to zero)"
+            )
+    elif snap.mode == FlightMode.RUNNING:
+        if snap.throttle_pct <= 0:
+            st.info("Increase throttle to spin the motors.")
+        else:
+            st.success(f"Systems running — throttle {snap.throttle_pct:.0f}%")
+
     st.subheader("Motor speed (RPM)")
-    st.bar_chart(
-        {f"M{motor.index}": speed_pct_to_rpm(motor.speed_pct) for motor in snap.motors},
-        height=320,
-    )
+    render_motor_rpm_chart(snap.motors)
 
     st.caption(f"Live tachometer readings — 0 to {MOTOR_MAX_RPM:,.0f} RPM full scale")
 
