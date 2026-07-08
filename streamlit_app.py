@@ -9,7 +9,13 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from bench_supervisor import BenchSupervisor, FlightMode, RecoveryPhase
+from bench_supervisor import (
+    BenchSupervisor,
+    FlightMode,
+    RECOVERY_DURATION_S,
+    RECOVERY_PHASES,
+    RecoveryPhase,
+)
 from drone_physics import NUM_MOTORS
 from octocopter_schematic import MOTOR_COLORS, render_octocopter_schematic
 
@@ -23,10 +29,11 @@ def speed_pct_to_rpm(speed_pct: float) -> float:
 
 
 def clear_demo_session() -> None:
-    st.session_state.pop("throttle_input", None)
+    st.session_state.throttle_input = 0
     st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
     st.session_state.pop("demo_frozen", None)
     st.session_state.pop("frozen_snapshot", None)
+    st.session_state.pop("recovery_chart_started_at", None)
 
 
 def get_display_snapshot():
@@ -79,6 +86,45 @@ def inject_styles() -> None:
             border-color: #68d391;
             background: #f0fff4;
         }
+        .recovery-stepper-block {
+            margin: 0.75rem 0 1rem 0;
+            padding: 0.75rem 0.85rem;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            background: #f8fafc;
+        }
+        .recovery-stepper-label {
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: #718096;
+            margin-bottom: 0.5rem;
+        }
+        .recovery-substepper {
+            display: flex;
+            gap: 0.3rem;
+            flex-wrap: wrap;
+        }
+        .recovery-step {
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 0.3rem 0.55rem;
+            border-radius: 999px;
+            border: 1px solid #cbd5e0;
+            color: #718096;
+            background: #ffffff;
+        }
+        .recovery-step.active {
+            color: #9c4221;
+            border-color: #ed8936;
+            background: #fffaf0;
+        }
+        .recovery-step.done {
+            color: #276749;
+            border-color: #68d391;
+            background: #f0fff4;
+        }
         .status-metric {
             font-size: 0.85rem;
             color: #4a5568;
@@ -103,32 +149,117 @@ def active_motor_count(motors: list) -> int:
     return sum(1 for m in motors if m.enabled and not m.stalled and m.speed_pct > 0.01)
 
 
+RECOVERY_STEPS: tuple[tuple[RecoveryPhase, str], ...] = (
+    (RecoveryPhase.FAULT_DETECTED, "Error"),
+    (RecoveryPhase.CALCULATING, "Calculating"),
+    (RecoveryPhase.APPLYING, "Applying"),
+    (RecoveryPhase.DESCEND, "Descending"),
+    (RecoveryPhase.TOUCHDOWN, "Touchdown"),
+    (RecoveryPhase.COMPLETE, "Review"),
+)
+
+CHART_PHASE_LABELS = ("Error", "Calc", "Apply", "Descend", "Touchdown")
+CHART_PHASE_COLORS = ("#fca5a5", "#cbd5e1", "#fcd34d", "#7dd3fc", "#6ee7b7")
+CHART_PHASE_OPACITY = 0.48
+
+
 def mission_step_index(snap) -> int:
     if snap.mode == FlightMode.OFF:
         return 0
     if snap.mode == FlightMode.RUNNING and snap.throttle_pct <= 0:
         return 1
-    if snap.mode == FlightMode.RUNNING:
-        return 2
-    if snap.mode == FlightMode.RECOVERY_LANDING and not recovery_landing_complete(snap):
-        return 3
-    if recovery_landing_complete(snap):
-        return 4
+    return 2
+
+
+def recovery_step_index(snap) -> int:
+    for idx, (phase, _) in enumerate(RECOVERY_STEPS):
+        if snap.recovery_phase == phase:
+            return idx
     return 0
 
 
+def recovery_overall_progress(snap) -> float:
+    if snap.recovery_phase == RecoveryPhase.COMPLETE:
+        return 1.0
+    if snap.mode != FlightMode.RECOVERY_LANDING:
+        return 0.0
+
+    elapsed = 0.0
+    for duration, phase in RECOVERY_PHASES:
+        if phase == snap.recovery_phase:
+            elapsed += duration * snap.recovery_progress
+            break
+        elapsed += duration
+    return min(1.0, elapsed / RECOVERY_DURATION_S)
+
+
+def in_recovery_story(snap) -> bool:
+    return snap.mode == FlightMode.RECOVERY_LANDING or st.session_state.get("demo_frozen", False)
+
+
+def _record_recovery_chart_start(snap) -> None:
+    if snap.mode != FlightMode.RECOVERY_LANDING:
+        return
+    if st.session_state.get("recovery_chart_started_at") is not None:
+        return
+    if snap.events:
+        st.session_state.recovery_chart_started_at = snap.events[-1].timestamp_ns / 1e9
+
+
+def _recovery_phase_regions_df(recovery_start_elapsed: float, y_max: float) -> pd.DataFrame:
+    rows = []
+    cursor = recovery_start_elapsed
+    for (duration, _), label in zip(RECOVERY_PHASES, CHART_PHASE_LABELS):
+        rows.append(
+            {
+                "start": cursor,
+                "end": cursor + duration,
+                "phase": label,
+                "y_min": 0.0,
+                "y_max": y_max,
+            }
+        )
+        cursor += duration
+    return pd.DataFrame(rows)
+
+
 def render_mission_stepper(snap) -> None:
-    steps = ["Bench off", "Preflight", "Hover check", "Fault response", "Landed"]
-    active = mission_step_index(snap)
+    main_steps = ["Bench off", "Preflight", "Hover check"]
+    main_active = mission_step_index(snap)
+    if in_recovery_story(snap):
+        main_active = len(main_steps)
+
     pills = []
-    for idx, label in enumerate(steps):
+    for idx, label in enumerate(main_steps):
         css_class = "mission-step"
-        if idx < active:
+        if idx < main_active:
             css_class += " done"
-        elif idx == active:
+        elif idx == main_active and not in_recovery_story(snap):
             css_class += " active"
         pills.append(f'<span class="{css_class}">{label}</span>')
     st.markdown(f'<div class="mission-stepper">{"".join(pills)}</div>', unsafe_allow_html=True)
+
+    if not in_recovery_story(snap):
+        return
+
+    recovery_active = recovery_step_index(snap)
+    sub_pills = []
+    for idx, (_, label) in enumerate(RECOVERY_STEPS):
+        css_class = "recovery-step"
+        if idx < recovery_active:
+            css_class += " done"
+        elif idx == recovery_active:
+            css_class += " active"
+        sub_pills.append(f'<span class="{css_class}">{label}</span>')
+
+    st.markdown(
+        f'<div class="recovery-stepper-block">'
+        f'<div class="recovery-stepper-label">Recovery sequence</div>'
+        f'<div class="recovery-substepper">{"".join(sub_pills)}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.progress(recovery_overall_progress(snap), text="Recovery progress")
 
 
 def render_story_banner(snap) -> None:
@@ -172,6 +303,8 @@ def append_rpm_history(snap) -> None:
     if "rpm_history" not in st.session_state:
         st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
 
+    _record_recovery_chart_start(snap)
+
     now = time.time()
     row: dict = {"time": now}
     for motor in snap.motors:
@@ -205,6 +338,8 @@ def render_rpm_trend_chart(snap) -> None:
 
     color_range = [MOTOR_COLORS[i] for i in range(1, NUM_MOTORS + 1)]
     motor_domain = motor_cols
+    if stalled_label:
+        color_range[motor_domain.index(stalled_label)] = "#e53e3e"
 
     max_rpm = float(long_df["RPM"].max()) if not long_df.empty else 0.0
     if max_rpm > MOTOR_MAX_RPM * 0.8:
@@ -212,31 +347,64 @@ def render_rpm_trend_chart(snap) -> None:
     else:
         y_max = min(MOTOR_MAX_RPM, max(1_000.0, max_rpm * 1.2))
 
-    base = alt.Chart(long_df).encode(
-        x=alt.X("elapsed_s:Q", title="Seconds"),
-        y=alt.Y("RPM:Q", title="RPM", scale=alt.Scale(domain=[0, y_max], zero=True)),
-        color=alt.Color("Motor:N", scale=alt.Scale(domain=motor_domain, range=color_range), legend=alt.Legend(title="Motor")),
-        tooltip=["Motor", alt.Tooltip("RPM", format=",.0f"), alt.Tooltip("elapsed_s", format=".1f")],
-    )
+    x_max = float(df["elapsed_s"].max())
+    recovery_start = st.session_state.get("recovery_chart_started_at")
+    if recovery_start is not None:
+        recovery_start_elapsed = recovery_start - t0
+        regions_df = _recovery_phase_regions_df(recovery_start_elapsed, y_max)
+        x_max = max(x_max, float(regions_df["end"].max()))
 
-    lines = base.mark_line(strokeWidth=1.5, opacity=0.85)
+    line_stroke = 2.25
+    line_encode = {
+        "x": alt.X("elapsed_s:Q", title="Seconds", scale=alt.Scale(domain=[0, x_max])),
+        "y": alt.Y("RPM:Q", title="RPM", scale=alt.Scale(domain=[0, y_max], zero=True)),
+        "color": alt.Color(
+            "Motor:N",
+            scale=alt.Scale(domain=motor_domain, range=color_range),
+            legend=alt.Legend(title="Motor"),
+        ),
+        "tooltip": ["Motor", alt.Tooltip("RPM", format=",.0f"), alt.Tooltip("elapsed_s", format=".1f")],
+    }
     if stalled_label:
-        stalled_df = long_df[long_df["Motor"] == stalled_label]
-        if not stalled_df.empty:
-            stalled_line = (
-                alt.Chart(stalled_df)
-                .mark_line(strokeWidth=3.5, color="#e53e3e")
-                .encode(
-                    x="elapsed_s:Q",
-                    y=alt.Y("RPM:Q", scale=alt.Scale(domain=[0, y_max], zero=True)),
-                )
-            )
-            chart = (lines + stalled_line).properties(height=280)
-        else:
-            chart = lines.properties(height=280)
-    else:
-        chart = lines.properties(height=280)
+        line_encode["strokeDash"] = alt.condition(
+            alt.datum.Motor == stalled_label,
+            alt.value([8, 4]),
+            alt.value([]),
+        )
 
+    lines = alt.Chart(long_df).encode(**line_encode).mark_line(strokeWidth=line_stroke, opacity=1.0)
+
+    chart_layers = []
+    if recovery_start is not None:
+        phase_chart = (
+            alt.Chart(regions_df)
+            .mark_rect(opacity=CHART_PHASE_OPACITY)
+            .encode(
+                x=alt.X("start:Q", scale=alt.Scale(domain=[0, x_max])),
+                x2="end:Q",
+                y=alt.Y("y_min:Q", scale=alt.Scale(domain=[0, y_max], zero=True)),
+                y2="y_max:Q",
+                color=alt.Color(
+                    "phase:N",
+                    scale=alt.Scale(domain=list(CHART_PHASE_LABELS), range=list(CHART_PHASE_COLORS)),
+                    legend=alt.Legend(title="Phase", orient="top", direction="horizontal"),
+                ),
+                tooltip=[
+                    alt.Tooltip("phase:N", title="Phase"),
+                    alt.Tooltip("start:Q", title="Start (s)", format=".1f"),
+                    alt.Tooltip("end:Q", title="End (s)", format=".1f"),
+                ],
+            )
+        )
+        chart_layers.append(phase_chart)
+
+    chart_layers.append(lines)
+
+    chart = (
+        alt.layer(*chart_layers)
+        .resolve_scale(color="independent", x="shared", y="shared")
+        .properties(height=300)
+    )
     st.altair_chart(chart, width="stretch")
 
 
