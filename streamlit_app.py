@@ -453,16 +453,86 @@ def live_telemetry() -> None:
         st.caption("Live tachometer readings — stalled motor highlighted in red.")
 
 
+def render_instro_faq_section() -> None:
+    st.divider()
+    st.markdown("## FAQ")
+
+    with st.container(border=True):
+        with st.expander("What is Nominal Instro?"):
+            st.markdown(
+                "Nominal Instro is a Python library for talking to test-and-measurement instruments "
+                "(power supplies, multimeters, electronic loads, DAQs, oscilloscopes, PLCs) from a "
+                "unified, typed API."
+            )
+            st.markdown(
+                "Install with `pip install instro` (Python 3.10–3.13). "
+                "This demo uses **`InstroDAQ`** with a simulated LabJack T7 driver — "
+                "the same class you'd use on a real bench."
+            )
+
+        with st.expander("Why is it useful?"):
+            st.markdown(
+                "Instro gives you one consistent pattern across instrument types: construct, `open()`, "
+                "configure, measure, `close()`. Test logic talks to Instro classes (`InstroPSU`, "
+                "`InstroDAQ`, `InstroDMM`, …) instead of vendor-specific APIs, so you swap drivers "
+                "without rewriting your workflow."
+            )
+            st.markdown(
+                "- **Simulated drivers** — develop and demo without hardware (this app runs entirely in-process)\n"
+                "- **Optional extras** — install only the vendor SDKs you need, e.g. `pip install \"instro[labjack]\"`\n"
+                "- **Publishers** — stream measurements to a file, a custom destination, or [Nominal](https://nominal.io)\n"
+                "- **Typed channels** — aliases, scaling, and structured reads (see `bench_supervisor.py` calling "
+                "`configure_analog_channel()`, `write_analog_value()`, and `read_analog()` at 10 Hz)"
+            )
+            st.markdown(
+                "In this demo, stall detection and recovery landing react to real `read_analog()` "
+                "measurements — the supervisor never bypasses Instro to peek at the physics model."
+            )
+
+        with st.expander("What devices does it support?"):
+            st.markdown(
+                "Instro ships drivers for common bench equipment. Vendor-specific SDKs are optional "
+                "extras; community-contributed drivers live in [`instro-contrib`](https://pypi.org/project/instro-contrib/) "
+                "(`pip install \"instro[contrib]\"`)."
+            )
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        ("Power supply", "InstroPSU", "B&K Precision (9115, 914X), Keysight (E36100-series), Rigol (DP800-series), Siglent (SPD3303), TDK Lambda (Genesys), simulated"),
+                        ("Multimeter", "InstroDMM", "Agilent 34401A, Keithley 2400, Keithley 2750 (unstable)"),
+                        ("Electronic load", "InstroELoad", "B&K Precision (85xxB-series)"),
+                        ("Oscilloscope", "InstroScope", "Keysight (1200X-series), Tektronix (2-series), Siglent (SDS1000X-E)"),
+                        ("DAQ", "InstroDAQ", "Keysight 34980A, NI-DAQmx, LabJack T-series, MCC USB-series"),
+                        ("I2C", "I2CInterface", "Total Phase Aardvark"),
+                        ("Modbus", "ModbusDevice", "Any Modbus TCP / RTU device"),
+                        ("EtherNet/IP", "EtherNetIPDevice", "Allen-Bradley / CompactLogix-class PLCs"),
+                    ],
+                    columns=["Category", "Class", "Vendors"],
+                ),
+                column_config={
+                    "Category": st.column_config.TextColumn("Category", width="small"),
+                    "Class": st.column_config.TextColumn("Class", width="small"),
+                    "Vendors": st.column_config.TextColumn("Vendors", width="large"),
+                },
+                hide_index=True,
+            )
+            st.caption(
+                "This demo uses InstroDAQ + LabJack T-series. Swap `SimulatedLabJackT7` for "
+                "`LabJackTSeriesDriver` in `bench_supervisor.py` to run on hardware."
+            )
+
+
 def main() -> None:
-    st.set_page_config(page_title="Octocopter Motor Bench", page_icon="🛸", layout="wide")
+    st.set_page_config(
+        page_title="Octocopter motor bench | Nominal Instro",
+        page_icon=":material/sensors:",
+        layout="wide",
+    )
     inject_styles()
 
-    st.title("Octocopter Motor Bench")
-    st.caption(
-        "Preflight power check via InstroDAQ — 8-motor redundant platform, "
-        "stall detection, and asymmetric recovery landing "
-        "(simulated LabJack T7 + expansion)"
-    )
+    st.markdown("# :material/sensors: Octocopter motor failure testbench - Powered by Nominal Instro")
+    st.markdown("""This app is designed to test the recovery logic for our octocopter. Start the motors, choose one to inject a fault into, and watch the system safely execute a simulated landing sequence using the remaining working motors.
+    """)
 
     controls_col, schematic_col = st.columns([2, 3])
     with controls_col:
@@ -472,21 +542,7 @@ def main() -> None:
 
     live_telemetry()
 
-    st.divider()
-    with st.expander("How this uses instro", expanded=False):
-        st.code(
-            """from instro.daq import InstroDAQ
-from simulated_labjack import SimulatedLabJackT7
-# from instro.daq.drivers.labjack import LabJackTSeriesDriver  # real bench
-
-driver = SimulatedLabJackT7(device_id="470010000")
-daq = InstroDAQ(name="drone_bench", driver=driver)
-daq.open()
-daq.configure_analog_channel(Direction.OUTPUT, "DAC0", alias="m1_cmd", range_min=0, range_max=5)
-daq.write_analog_value("m1_cmd", 3.5)
-measurement = daq.read_analog()  # reads m1_current, m1_tach, ... m8_tach""",
-            language="python",
-        )
+    render_instro_faq_section()
 
 
 if __name__ == "__main__":
