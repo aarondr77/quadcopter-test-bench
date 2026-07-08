@@ -430,10 +430,10 @@ def render_octocopter_schematic(
     selected_motor: int | None = None,
 ) -> None:
     """Render top-down 8-motor octocopter schematic from motor snapshots."""
-    recovering = mode == FlightMode.RECOVERY_LANDING and recovery_phase not in (
-        None,
-        RecoveryPhase.NONE,
-        RecoveryPhase.COMPLETE,
+    recovering = mode == FlightMode.RECOVERY_LANDING and recovery_phase in (
+        RecoveryPhase.APPLYING,
+        RecoveryPhase.DESCEND,
+        RecoveryPhase.TOUCHDOWN,
     )
     payload = {
         "mode": mode.value,

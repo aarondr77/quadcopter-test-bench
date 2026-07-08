@@ -14,12 +14,35 @@ from drone_physics import NUM_MOTORS
 from octocopter_schematic import MOTOR_COLORS, render_octocopter_schematic
 
 MOTOR_MAX_RPM = 10_000.0
-TREND_WINDOW_S = 20.0
-TREND_MAX_SAMPLES = 200
+TREND_WINDOW_S = 120.0
+TREND_MAX_SAMPLES = 800
 
 
 def speed_pct_to_rpm(speed_pct: float) -> float:
     return speed_pct / 100.0 * MOTOR_MAX_RPM
+
+
+def clear_demo_session() -> None:
+    st.session_state.pop("throttle_input", None)
+    st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
+    st.session_state.pop("demo_frozen", None)
+    st.session_state.pop("frozen_snapshot", None)
+
+
+def get_display_snapshot():
+    """Return live snapshot, or freeze everything at landing for review."""
+    if st.session_state.get("demo_frozen") and st.session_state.get("frozen_snapshot"):
+        return st.session_state.frozen_snapshot
+
+    snap = get_bench().snapshot()
+    if (
+        snap.mode == FlightMode.RECOVERY_LANDING
+        and snap.recovery_phase == RecoveryPhase.COMPLETE
+        and not st.session_state.get("demo_frozen")
+    ):
+        st.session_state.demo_frozen = True
+        st.session_state.frozen_snapshot = snap
+    return snap
 
 
 @st.cache_resource
@@ -121,24 +144,31 @@ def render_story_banner(snap) -> None:
         return
 
     if snap.mode == FlightMode.RECOVERY_LANDING:
-        stalled = snap.stalled_motor or "?"
+        motor = snap.stalled_motor or "?"
         if recovery_landing_complete(snap):
-            st.success("Touchdown — safe landing complete. Use **Start New Preflight** to run again.")
-            return
-        if snap.recovery_phase == RecoveryPhase.COMPENSATE:
-            st.warning(
-                f"Motor {stalled} stall — channel isolated, "
-                "redistributing thrust asymmetrically across 7 motors."
+            st.success(
+                "Safe landing complete — timeline paused. "
+                "Review the motor cadence chart below, then **Start New Preflight**."
             )
+            return
+        if snap.recovery_phase == RecoveryPhase.FAULT_DETECTED:
+            st.error(f"**Motor {motor} error detected** — channel isolated.")
+        elif snap.recovery_phase == RecoveryPhase.CALCULATING:
+            st.warning("Calculating safe descent motor cadence…")
+        elif snap.recovery_phase == RecoveryPhase.APPLYING:
+            st.warning(f"Applying safe motor cadence to the **7 remaining motors**.")
         elif snap.recovery_phase == RecoveryPhase.DESCEND:
             st.warning("Controlled descent in progress — motors remain powered.")
         elif snap.recovery_phase == RecoveryPhase.TOUCHDOWN:
-            st.warning("Touchdown sequence — cutting motor power.")
+            st.warning("Touchdown — reducing motor power.")
         else:
-            st.warning(f"Motor {stalled} stall — recovery landing in progress.")
+            st.warning(f"Motor {motor} error — recovery landing in progress.")
 
 
 def append_rpm_history(snap) -> None:
+    if st.session_state.get("demo_frozen"):
+        return
+
     if "rpm_history" not in st.session_state:
         st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
 
@@ -147,6 +177,9 @@ def append_rpm_history(snap) -> None:
     for motor in snap.motors:
         row[f"M{motor.index}"] = speed_pct_to_rpm(motor.speed_pct)
     st.session_state.rpm_history.append(row)
+
+    if snap.mode == FlightMode.RECOVERY_LANDING:
+        return
 
     cutoff = now - TREND_WINDOW_S
     while st.session_state.rpm_history and st.session_state.rpm_history[0]["time"] < cutoff:
@@ -246,21 +279,18 @@ def render_controls_column(snap, bench: BenchSupervisor) -> None:
     if snap.mode == FlightMode.OFF:
         if st.button("Power On", type="primary", key="power_on"):
             bench.power_on()
-            st.session_state.pop("throttle_input", None)
-            st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
+            clear_demo_session()
             st.rerun()
     else:
         if st.button("Power Off", key="power_off"):
             bench.power_off()
-            st.session_state.pop("throttle_input", None)
-            st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
+            clear_demo_session()
             st.rerun()
         if recovery_landing_complete(snap):
             if st.button("Start New Preflight", type="primary", key="new_preflight"):
                 bench.power_off()
                 bench.power_on()
-                st.session_state.pop("throttle_input", None)
-                st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
+                clear_demo_session()
                 st.rerun()
 
     st.markdown("#### Throttle")
@@ -322,7 +352,15 @@ def render_status_column(snap) -> None:
     )
 
     if snap.mode == FlightMode.RECOVERY_LANDING and snap.recovery_phase != RecoveryPhase.NONE:
-        phase_label = snap.recovery_phase.value.replace("_", " ").title()
+        phase_labels = {
+            RecoveryPhase.FAULT_DETECTED: "Error detected",
+            RecoveryPhase.CALCULATING: "Calculating cadence",
+            RecoveryPhase.APPLYING: "Applying cadence",
+            RecoveryPhase.DESCEND: "Controlled descent",
+            RecoveryPhase.TOUCHDOWN: "Touchdown",
+            RecoveryPhase.COMPLETE: "Landed",
+        }
+        phase_label = phase_labels.get(snap.recovery_phase, snap.recovery_phase.value)
         st.markdown(
             f'<p class="status-metric">Recovery phase: <strong>{phase_label}</strong></p>',
             unsafe_allow_html=True,
@@ -331,13 +369,16 @@ def render_status_column(snap) -> None:
 
 @st.fragment
 def bench_controls() -> None:
-    snap = get_bench().snapshot()
+    snap = get_display_snapshot()
     render_controls_column(snap, get_bench())
 
 
 @st.fragment(run_every=0.15)
 def live_schematic() -> None:
-    snap = get_bench().snapshot()
+    if st.session_state.get("demo_frozen"):
+        snap = st.session_state.frozen_snapshot
+    else:
+        snap = get_display_snapshot()
     selected = st.session_state.get("fault_motor")
     st.markdown("#### Octocopter")
     render_octocopter_schematic(
@@ -350,7 +391,7 @@ def live_schematic() -> None:
 
 @st.fragment(run_every=0.15)
 def live_telemetry() -> None:
-    snap = get_bench().snapshot()
+    snap = get_display_snapshot()
 
     if snap.mode != FlightMode.OFF:
         append_rpm_history(snap)
@@ -361,7 +402,10 @@ def live_telemetry() -> None:
 
     st.markdown("#### RPM trend")
     render_rpm_trend_chart(snap)
-    st.caption(f"Last {TREND_WINDOW_S:.0f}s of tachometer readings — stalled motor highlighted in red.")
+    if st.session_state.get("demo_frozen"):
+        st.caption("Timeline paused at touchdown — review how each motor responded during recovery.")
+    else:
+        st.caption("Live tachometer readings — stalled motor highlighted in red.")
 
     col_a, col_b = st.columns(2)
     with col_a:

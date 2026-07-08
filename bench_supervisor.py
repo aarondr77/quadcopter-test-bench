@@ -17,10 +17,18 @@ from simulated_labjack import SimulatedLabJackT7
 
 logger = logging.getLogger(__name__)
 
-COMPENSATE_DURATION_S = 1.0
-DESCEND_DURATION_S = 5.0
-TOUCHDOWN_DURATION_S = 2.0
-RECOVERY_DURATION_S = COMPENSATE_DURATION_S + DESCEND_DURATION_S + TOUCHDOWN_DURATION_S
+FAULT_DETECTED_DURATION_S = 1.0
+CALCULATING_DURATION_S = 5.0
+APPLYING_DURATION_S = 8.0
+DESCEND_DURATION_S = 22.0
+TOUCHDOWN_DURATION_S = 5.0
+RECOVERY_DURATION_S = (
+    FAULT_DETECTED_DURATION_S
+    + CALCULATING_DURATION_S
+    + APPLYING_DURATION_S
+    + DESCEND_DURATION_S
+    + TOUCHDOWN_DURATION_S
+)
 DESCEND_FRACTION = 0.45
 TICK_INTERVAL_S = 0.1
 
@@ -43,10 +51,21 @@ class FlightMode(str, Enum):
 
 class RecoveryPhase(str, Enum):
     NONE = "none"
-    COMPENSATE = "compensate"
+    FAULT_DETECTED = "fault_detected"
+    CALCULATING = "calculating"
+    APPLYING = "applying"
     DESCEND = "descend"
     TOUCHDOWN = "touchdown"
     COMPLETE = "complete"
+
+
+RECOVERY_PHASES: tuple[tuple[float, RecoveryPhase], ...] = (
+    (FAULT_DETECTED_DURATION_S, RecoveryPhase.FAULT_DETECTED),
+    (CALCULATING_DURATION_S, RecoveryPhase.CALCULATING),
+    (APPLYING_DURATION_S, RecoveryPhase.APPLYING),
+    (DESCEND_DURATION_S, RecoveryPhase.DESCEND),
+    (TOUCHDOWN_DURATION_S, RecoveryPhase.TOUCHDOWN),
+)
 
 
 @dataclass
@@ -190,22 +209,29 @@ class BenchSupervisor:
     def _recovery_phase_and_progress(self, elapsed_s: float) -> tuple[RecoveryPhase, float]:
         if elapsed_s >= RECOVERY_DURATION_S:
             return RecoveryPhase.COMPLETE, 1.0
-        if elapsed_s < COMPENSATE_DURATION_S:
-            return RecoveryPhase.COMPENSATE, elapsed_s / COMPENSATE_DURATION_S
-        if elapsed_s < COMPENSATE_DURATION_S + DESCEND_DURATION_S:
-            phase_elapsed = elapsed_s - COMPENSATE_DURATION_S
-            return RecoveryPhase.DESCEND, phase_elapsed / DESCEND_DURATION_S
-        phase_elapsed = elapsed_s - COMPENSATE_DURATION_S - DESCEND_DURATION_S
-        return RecoveryPhase.TOUCHDOWN, phase_elapsed / TOUCHDOWN_DURATION_S
+
+        phase_start = 0.0
+        for duration, phase in RECOVERY_PHASES:
+            if elapsed_s < phase_start + duration:
+                return phase, (elapsed_s - phase_start) / duration
+            phase_start += duration
+
+        return RecoveryPhase.COMPLETE, 1.0
+
+    def _hover_voltage(self, motor: int) -> float:
+        return self._recovery_base_cmds.get(motor, 0.0)
 
     def _compensate_voltage(self, motor: int) -> float:
-        base = self._recovery_base_cmds.get(motor, 0.0)
+        base = self._hover_voltage(motor)
         weight = self._compensation_weights.get(motor, 1.0)
         return min(CMD_VOLTAGE_MAX, base * weight)
 
     def _healthy_motor_voltage(self, motor: int, phase: RecoveryPhase, phase_progress: float) -> float:
+        if phase in (RecoveryPhase.FAULT_DETECTED, RecoveryPhase.CALCULATING):
+            return self._hover_voltage(motor)
+
         compensate_v = self._compensate_voltage(motor)
-        if phase == RecoveryPhase.COMPENSATE:
+        if phase == RecoveryPhase.APPLYING:
             return compensate_v
         if phase == RecoveryPhase.DESCEND:
             descend_end = compensate_v * DESCEND_FRACTION
