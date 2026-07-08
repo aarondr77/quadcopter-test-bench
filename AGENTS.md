@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Single-process **Drone Motor Bench** demo: a Streamlit UI (`streamlit_app.py`) over an in-process `BenchSupervisor` that uses Nominal **Instro** `InstroDAQ` with a simulated LabJack T7 (`simulated_labjack.py`) and quadcopter plant model (`drone_physics.py`).
+Single-process **Octocopter Motor Bench** demo: a Streamlit UI (`streamlit_app.py`) over an in-process `BenchSupervisor` that uses Nominal **Instro** `InstroDAQ` with a simulated LabJack T7 (`simulated_labjack.py`) and octocopter plant model (`drone_physics.py`, 8 motors).
 
 There is no database, Docker, or separate backend service. Default mode is fully simulated (no physical LabJack hardware).
 
@@ -31,15 +31,17 @@ Every cloud agent run that changes bench UI or behavior must **record a short sc
 
 **Demo script (record all steps):**
 
-1. Open http://localhost:8501 and wait for the **Drone Motor Bench** page to load.
-2. Click **Power on** → Flight mode should become **RUNNING**.
-3. Set **Throttle (%)** to ~75% → all four motors should show non-zero speed and current.
-4. Click **Inject stall on Motor 1**.
+1. Open http://localhost:8501 and wait for the **Octocopter Motor Bench** page to load.
+2. Click **Power on** → mission stepper should show **Preflight** / **Hover check**.
+3. Set **Throttle (%)** to ~75% → all eight motors should spin on the octocopter schematic.
+4. Select **Motor 1** and click **Inject stall**.
 5. Confirm recovery state:
-   - Red banner: stall detected, channel isolated, recovery landing active
-   - Motor 1: **STALLED / ISOLATED** at 0% speed
-   - Flight mode: **RECOVERY LANDING**
+   - Banner: stall detected, asymmetric redistribution / controlled descent
+   - Motor 1: **STALL** badge, 0 RPM on schematic
+   - Recovery phase badge: Compensate → Descend → Touchdown
+   - RPM trend: M1 flat at zero; M2–M8 diverge then descend together
    - Event log: Motor 1 stall with peak current (~12 A)
+6. Wait for **Landed** stepper state and touchdown success banner.
 6. Save the screen recording as an artifact (e.g. `drone-bench-demo`) and include at least one screenshot of the recovery state in the PR/summary.
 
 If you changed only non-UI backend logic, still run this flow and record it so reviewers can see behavior is unchanged (or show what changed).

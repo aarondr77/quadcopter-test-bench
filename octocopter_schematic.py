@@ -1,12 +1,13 @@
-"""Top-down quadcopter schematic for live bench motor telemetry."""
+"""Top-down octocopter schematic for live bench motor telemetry."""
 
 from __future__ import annotations
 
 import json
+import math
 
 import streamlit as st
 
-from bench_supervisor import FlightMode
+from bench_supervisor import FlightMode, RecoveryPhase
 
 MOTOR_MAX_RPM = 10_000.0
 MAX_REV_PER_SEC = 10.0
@@ -16,66 +17,73 @@ MOTOR_COLORS = {
     2: "#ff7f0e",
     3: "#2ca02c",
     4: "#d62728",
+    5: "#9467bd",
+    6: "#8c564b",
+    7: "#e377c2",
+    8: "#17becf",
 }
 
-# Motor arm endpoints in SVG coordinates (viewBox 0 0 300 300).
+MOTOR_SPIN = {1: "CW", 2: "CCW", 3: "CW", 4: "CCW", 5: "CW", 6: "CCW", 7: "CW", 8: "CCW"}
+
+_CENTER = (150, 150)
+_RADIUS = 95
 MOTOR_POSITIONS = {
-    1: (78, 78),    # front-left
-    2: (78, 222),   # rear-left
-    3: (222, 222),  # rear-right
-    4: (222, 78),   # front-right
+    i: (
+        round(_CENTER[0] + _RADIUS * math.sin(math.radians((i - 1) * 45)), 1),
+        round(_CENTER[1] - _RADIUS * math.cos(math.radians((i - 1) * 45)), 1),
+    )
+    for i in range(1, 9)
 }
 
-_SCHEMATIC_HTML = """
-<div class="quad-schematic-root">
-  <svg id="quad-svg" viewBox="0 0 300 300" role="img" aria-label="Quadcopter top-down schematic">
+_ARMS_SVG = "\n      ".join(
+    f'<line class="arm" x1="150" y1="150" x2="{x}" y2="{y}" />'
+    f'<circle class="motor-pad" cx="{x}" cy="{y}" r="6" />'
+    for x, y in MOTOR_POSITIONS.values()
+)
+
+_SCHEMATIC_HTML = f"""
+<div class="octo-schematic-root">
+  <svg id="octo-svg" viewBox="0 0 300 330" role="img" aria-label="Octocopter top-down schematic">
     <defs>
       <filter id="prop-blur" x="-50%" y="-50%" width="200%" height="200%">
         <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" />
       </filter>
     </defs>
-    <rect class="quad-bg" x="0" y="0" width="300" height="300" rx="12" />
-    <g id="quad-frame">
-      <line class="arm" x1="150" y1="150" x2="78" y2="78" />
-      <line class="arm" x1="150" y1="150" x2="78" y2="222" />
-      <line class="arm" x1="150" y1="150" x2="222" y2="222" />
-      <line class="arm" x1="150" y1="150" x2="222" y2="78" />
-      <circle class="motor-pad" cx="78" cy="78" r="7" />
-      <circle class="motor-pad" cx="78" cy="222" r="7" />
-      <circle class="motor-pad" cx="222" cy="222" r="7" />
-      <circle class="motor-pad" cx="222" cy="78" r="7" />
+    <rect class="octo-bg" x="0" y="0" width="300" height="330" rx="12" />
+    <g id="octo-frame">
+      {_ARMS_SVG}
       <rect class="body" x="132" y="132" width="36" height="36" rx="8" />
       <rect class="body-core" x="140" y="140" width="20" height="20" rx="4" />
       <polygon class="nose" points="150,104 143,122 157,122" />
       <line class="nose-stem" x1="150" y1="122" x2="150" y2="132" />
     </g>
-    <g id="quad-motors"></g>
+    <g id="octo-motors"></g>
   </svg>
 </div>
 """
 
 _SCHEMATIC_CSS = """
-.quad-schematic-root {
+.octo-schematic-root {
   width: 100%;
-  min-height: 280px;
+  min-height: 420px;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0.5rem 0;
 }
-#quad-svg {
+#octo-svg {
   width: 100%;
-  max-width: 320px;
-  aspect-ratio: 1;
+  height: auto;
   display: block;
 }
-.quad-bg {
+.octo-bg {
   fill: #ffffff;
   stroke: #e2e8f0;
   stroke-width: 1;
 }
 .arm {
   stroke: #718096;
-  stroke-width: 4;
+  stroke-width: 3;
   stroke-linecap: round;
 }
 .motor-pad {
@@ -103,9 +111,27 @@ _SCHEMATIC_CSS = """
 }
 .motor-label {
   font-family: system-ui, -apple-system, sans-serif;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   fill: #2d3748;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+.spin-label {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 8px;
+  font-weight: 600;
+  fill: #718096;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+.rpm-label {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 8px;
+  font-weight: 600;
+  fill: #4a5568;
   text-anchor: middle;
   dominant-baseline: middle;
   pointer-events: none;
@@ -130,9 +156,16 @@ _SCHEMATIC_CSS = """
   stroke: #e53e3e;
   stroke-width: 3;
 }
+.select-ring {
+  fill: none;
+  stroke: #3182ce;
+  stroke-width: 2.5;
+  stroke-dasharray: 4 3;
+  visibility: hidden;
+}
 .stall-badge {
   font-family: system-ui, -apple-system, sans-serif;
-  font-size: 8px;
+  font-size: 7px;
   font-weight: 700;
   fill: #ffffff;
   text-anchor: middle;
@@ -149,18 +182,27 @@ _SCHEMATIC_CSS = """
 _SCHEMATIC_JS = f"""
 const MOTOR_POSITIONS = {json.dumps({str(k): list(v) for k, v in MOTOR_POSITIONS.items()})};
 const MOTOR_COLORS = {json.dumps({str(k): v for k, v in MOTOR_COLORS.items()})};
+const MOTOR_SPIN = {json.dumps({str(k): v for k, v in MOTOR_SPIN.items()})};
 const MOTOR_MAX_RPM = {MOTOR_MAX_RPM};
 const MAX_REV_PER_SEC = {MAX_REV_PER_SEC};
 const DEG_PER_SEC_AT_MAX = MAX_REV_PER_SEC * 360.0;
+const RECOVERY_COLOR = "#d69e2e";
 
 const instances = new WeakMap();
 
-function motorStateKey(motor) {{
-  return `${{motor.index}}:${{motor.rpm}}:${{motor.stalled}}:${{motor.enabled}}`;
+function formatRpm(rpm) {{
+  if (rpm >= 1000) {{
+    return `${{(rpm / 1000).toFixed(1)}}k`;
+  }}
+  return `${{Math.round(rpm)}}`;
+}}
+
+function motorStateKey(motor, selectedMotor, recovering) {{
+  return `${{motor.index}}:${{motor.rpm}}:${{motor.stalled}}:${{motor.enabled}}:${{selectedMotor}}:${{recovering}}`;
 }}
 
 function ensureMotorNodes(svg, motors) {{
-  const motorsRoot = svg.querySelector("#quad-motors");
+  const motorsRoot = svg.querySelector("#octo-motors");
   const existing = new Map();
 
   motorsRoot.querySelectorAll("g.motor-node").forEach((node) => {{
@@ -172,29 +214,31 @@ function ensureMotorNodes(svg, motors) {{
       return;
     }}
 
-    const [cx, cy] = MOTOR_POSITIONS[String(motor.index)];
     const color = MOTOR_COLORS[String(motor.index)] || "#4a5568";
+    const spin = MOTOR_SPIN[String(motor.index)] || "";
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     group.classList.add("motor-node");
     group.dataset.index = String(motor.index);
-    group.setAttribute("transform", `translate(${{cx}}, ${{cy}})`);
 
     group.innerHTML = `
       <g class="prop-spin">
-        <circle class="prop-blur-disc" r="18" fill="${{color}}" />
-        <line class="prop-blades" x1="-15" y1="-4" x2="15" y2="4" stroke="${{color}}" />
-        <line class="prop-blades" x1="-15" y1="4" x2="15" y2="-4" stroke="${{color}}" />
-        <line class="prop-blades" x1="-4" y1="-15" x2="4" y2="15" stroke="${{color}}" />
-        <line class="prop-blades" x1="4" y1="-15" x2="-4" y2="15" stroke="${{color}}" />
-        <circle class="prop-disc" r="12" fill="${{color}}" stroke="#ffffff" stroke-width="2" />
-        <circle class="prop-hub" r="4" fill="#2d3748" stroke="#ffffff" stroke-width="1" />
+        <circle class="prop-blur-disc" r="16" fill="${{color}}" />
+        <line class="prop-blades" x1="-13" y1="-3" x2="13" y2="3" stroke="${{color}}" />
+        <line class="prop-blades" x1="-13" y1="3" x2="13" y2="-3" stroke="${{color}}" />
+        <line class="prop-blades" x1="-3" y1="-13" x2="3" y2="13" stroke="${{color}}" />
+        <line class="prop-blades" x1="3" y1="-13" x2="-3" y2="13" stroke="${{color}}" />
+        <circle class="prop-disc" r="10" fill="${{color}}" stroke="#ffffff" stroke-width="2" />
+        <circle class="prop-hub" r="3" fill="#2d3748" stroke="#ffffff" stroke-width="1" />
       </g>
-      <circle class="stall-ring" r="21" visibility="hidden" />
+      <circle class="select-ring" r="19" />
+      <circle class="stall-ring" r="19" visibility="hidden" />
       <g class="stall-badge-group" visibility="hidden">
-        <rect class="stall-badge-bg" x="-18" y="-7" width="36" height="14" rx="4" />
-        <text class="stall-badge" y="1">STALLED</text>
+        <rect class="stall-badge-bg" x="-16" y="-6" width="32" height="12" rx="3" />
+        <text class="stall-badge" y="1">STALL</text>
       </g>
-      <text class="motor-label" y="32">M${{motor.index}}</text>
+      <text class="motor-label" y="28">M${{motor.index}}</text>
+      <text class="spin-label" y="38">${{spin}}</text>
+      <text class="rpm-label" y="-24">0</text>
     `;
 
     motorsRoot.appendChild(group);
@@ -202,52 +246,71 @@ function ensureMotorNodes(svg, motors) {{
   }});
 }}
 
-function applyMotorVisual(node, motor) {{
-  const color = MOTOR_COLORS[String(motor.index)] || "#4a5568";
-  const spinGroup = node.querySelector(".prop-spin");
+function applyMotorVisual(node, motor, selectedMotor, recovering) {{
+  const baseColor = MOTOR_COLORS[String(motor.index)] || "#4a5568";
   const disc = node.querySelector(".prop-disc");
   const blurDisc = node.querySelector(".prop-blur-disc");
   const blades = node.querySelectorAll(".prop-blades");
   const stallRing = node.querySelector(".stall-ring");
   const stallBadge = node.querySelector(".stall-badge-group");
+  const selectRing = node.querySelector(".select-ring");
+  const rpmLabel = node.querySelector(".rpm-label");
 
   const running = motor.enabled && !motor.stalled && motor.rpm > 0.5;
   const idle = !motor.stalled && motor.rpm <= 0.5;
   const stalled = motor.stalled;
+  const inRecovery = recovering && !stalled && running;
 
-  node.style.opacity = idle ? "0.5" : "1";
+  let color = baseColor;
+  if (stalled) {{
+    color = "#fc8181";
+  }} else if (inRecovery) {{
+    color = RECOVERY_COLOR;
+  }}
 
-  disc.setAttribute("fill", stalled ? "#fc8181" : color);
+  node.style.opacity = idle ? "0.45" : "1";
+  if (rpmLabel) {{
+    rpmLabel.textContent = formatRpm(motor.rpm);
+  }}
+
+  disc.setAttribute("fill", color);
   disc.setAttribute("stroke", stalled ? "#e53e3e" : "#ffffff");
-  blurDisc.setAttribute("fill", stalled ? "#fc8181" : color);
+  blurDisc.setAttribute("fill", color);
   blurDisc.style.display = running ? "block" : "none";
 
   blades.forEach((blade) => {{
     blade.setAttribute("stroke", stalled ? "#e53e3e" : color);
-    blade.style.display = running ? "block" : "block";
   }});
 
   stallRing.setAttribute("visibility", stalled ? "visible" : "hidden");
   stallBadge.setAttribute("visibility", stalled ? "visible" : "hidden");
+  selectRing.setAttribute(
+    "visibility",
+    selectedMotor === motor.index && !stalled ? "visible" : "hidden",
+  );
 
   node.dataset.running = running ? "1" : "0";
   node.dataset.stalled = stalled ? "1" : "0";
   node.dataset.rpm = String(motor.rpm);
 }}
 
-function updateMotors(svg, motors) {{
+function updateMotors(svg, motors, selectedMotor, recovering) {{
   ensureMotorNodes(svg, motors);
-  const motorsRoot = svg.querySelector("#quad-motors");
-
+  const motorsRoot = svg.querySelector("#octo-motors");
   const byIndex = new Map(motors.map((motor) => [motor.index, motor]));
+
   motorsRoot.querySelectorAll("g.motor-node").forEach((node) => {{
     const motor = byIndex.get(Number(node.dataset.index));
     if (!motor) {{
       return;
     }}
-    const nextKey = motorStateKey(motor);
+
+    const [cx, cy] = MOTOR_POSITIONS[String(motor.index)];
+    node.setAttribute("transform", `translate(${{cx}}, ${{cy}})`);
+
+    const nextKey = motorStateKey(motor, selectedMotor, recovering);
     if (node.dataset.stateKey !== nextKey) {{
-      applyMotorVisual(node, motor);
+      applyMotorVisual(node, motor, selectedMotor, recovering);
       node.dataset.stateKey = nextKey;
     }} else {{
       node.dataset.rpm = String(motor.rpm);
@@ -305,8 +368,8 @@ function stopAnimationLoop(state) {{
 
 export default function (component) {{
   const {{ data, parentElement }} = component;
-  const root = parentElement.querySelector(".quad-schematic-root");
-  const svg = parentElement.querySelector("#quad-svg");
+  const root = parentElement.querySelector(".octo-schematic-root");
+  const svg = parentElement.querySelector("#octo-svg");
   if (!root || !svg) {{
     return;
   }}
@@ -323,7 +386,10 @@ export default function (component) {{
   }}
 
   const motors = (data && data.motors) || [];
-  updateMotors(svg, motors);
+  const selectedMotor = data && data.selectedMotor ? Number(data.selectedMotor) : null;
+  const recovering = Boolean(data && data.recovering);
+
+  updateMotors(svg, motors, selectedMotor, recovering);
 
   return () => {{
     stopAnimationLoop(state);
@@ -332,8 +398,8 @@ export default function (component) {{
 }}
 """
 
-_QUADCOPTER_COMPONENT = st.components.v2.component(
-    "quadcopter_schematic",
+_OCTOCOPTER_COMPONENT = st.components.v2.component(
+    "octocopter_schematic",
     html=_SCHEMATIC_HTML,
     css=_SCHEMATIC_CSS,
     js=_SCHEMATIC_JS,
@@ -357,14 +423,26 @@ def _motor_payload(motors: list) -> list[dict]:
     ]
 
 
-def render_quadcopter_schematic(motors: list, mode: FlightMode) -> None:
-    """Render top-down 2D quad schematic from motor snapshots."""
+def render_octocopter_schematic(
+    motors: list,
+    mode: FlightMode,
+    recovery_phase: RecoveryPhase | None = None,
+    selected_motor: int | None = None,
+) -> None:
+    """Render top-down 8-motor octocopter schematic from motor snapshots."""
+    recovering = mode == FlightMode.RECOVERY_LANDING and recovery_phase in (
+        RecoveryPhase.DESCEND,
+        RecoveryPhase.TOUCHDOWN,
+    )
     payload = {
         "mode": mode.value,
+        "recoveryPhase": recovery_phase.value if recovery_phase else RecoveryPhase.NONE.value,
+        "recovering": recovering,
+        "selectedMotor": selected_motor,
         "motors": _motor_payload(motors),
     }
-    _QUADCOPTER_COMPONENT(
+    _OCTOCOPTER_COMPONENT(
         data=payload,
-        key="quadcopter_schematic",
-        height=320,
+        key="octocopter_schematic",
+        height=480,
     )

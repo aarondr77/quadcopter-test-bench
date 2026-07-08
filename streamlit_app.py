@@ -1,28 +1,65 @@
-"""Drone motor bench demo — stall detection and autonomous recovery landing."""
+"""Octocopter motor bench demo — stall detection and autonomous recovery landing."""
 
 from __future__ import annotations
 
 import time
+from collections import deque
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
-from bench_supervisor import BenchSupervisor, FlightMode
-from quadcopter_schematic import render_quadcopter_schematic
+from bench_supervisor import (
+    BenchSupervisor,
+    FlightMode,
+    RECOVERY_DURATION_S,
+    RECOVERY_PHASES,
+    RecoveryPhase,
+)
+from drone_physics import NUM_MOTORS
+from octocopter_schematic import MOTOR_COLORS, render_octocopter_schematic
 
 MOTOR_MAX_RPM = 10_000.0
-
-MOTOR_COLORS = {
-    1: "#1f77b4",
-    2: "#ff7f0e",
-    3: "#2ca02c",
-    4: "#d62728",
-}
+TREND_WINDOW_S = 120.0
+TREND_MAX_SAMPLES = 800
+RPM_CHART_X_MAX_S = 50.0
+MOTOR_REST_RPM = 1.0
 
 
 def speed_pct_to_rpm(speed_pct: float) -> float:
     return speed_pct / 100.0 * MOTOR_MAX_RPM
+
+
+def motors_at_rest(snap) -> bool:
+    return all(
+        m.stalled or speed_pct_to_rpm(m.speed_pct) <= MOTOR_REST_RPM for m in snap.motors
+    )
+
+
+def clear_demo_session() -> None:
+    st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
+    st.session_state.pop("demo_frozen", None)
+    st.session_state.pop("frozen_snapshot", None)
+    st.session_state.pop("recovery_chart_started_at", None)
+
+
+def get_display_snapshot():
+    """Return live snapshot, or freeze everything at landing for review."""
+    if st.session_state.get("demo_frozen") and st.session_state.get("frozen_snapshot"):
+        return st.session_state.frozen_snapshot
+
+    return get_bench().snapshot()
+
+
+def maybe_freeze_demo(snap) -> None:
+    if (
+        snap.mode == FlightMode.RECOVERY_LANDING
+        and snap.recovery_phase == RecoveryPhase.COMPLETE
+        and motors_at_rest(snap)
+        and not st.session_state.get("demo_frozen")
+    ):
+        st.session_state.demo_frozen = True
+        st.session_state.frozen_snapshot = snap
 
 
 @st.cache_resource
@@ -30,61 +67,48 @@ def get_bench() -> BenchSupervisor:
     return BenchSupervisor(name="drone_bench")
 
 
-def inject_control_styles() -> None:
+def inject_styles() -> None:
     st.markdown(
         """
         <style>
-        .control-card-title {
-            font-size: 0.95rem;
-            font-weight: 600;
-            color: #2d3748;
-            text-align: center;
-            margin-bottom: 0.75rem;
-        }
-        div[data-testid="stHorizontalBlock"] div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: #ffffff;
-            min-height: 9rem;
-        }
-        div[data-testid="stHorizontalBlock"] div[data-testid="column"] .stButton > button {
-            min-height: 3.25rem;
-            font-size: 1.05rem;
-            font-weight: 600;
-            border-radius: 10px;
-        }
-        div[data-testid="stHorizontalBlock"] div[data-testid="column"] .stNumberInput input {
-            min-height: 3.25rem;
-            font-size: 1.05rem;
-            font-weight: 600;
-            border-radius: 10px;
-        }
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3)
-        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stButton"] > button {
-            aspect-ratio: 1;
-            min-height: 4rem;
-            padding: 0.5rem;
-        }
-        .motor-metric-card {
-            background: #ffffff;
+        .recovery-stepper-block {
+            margin: 0.75rem 0 1rem 0;
+            padding: 0.75rem 0.85rem;
             border: 1px solid #e2e8f0;
             border-radius: 10px;
-            padding: 0.85rem 1rem;
-            margin-bottom: 1.25rem;
+            background: #f8fafc;
         }
-        .motor-metric-title {
-            font-size: 0.85rem;
-            font-weight: 600;
-            color: #4a5568;
-            margin-bottom: 0.15rem;
-        }
-        .motor-metric-rpm {
-            font-size: 1.5rem;
+        .recovery-stepper-label {
+            font-size: 0.72rem;
             font-weight: 700;
-            line-height: 1.2;
-        }
-        .motor-metric-sub {
-            font-size: 0.8rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
             color: #718096;
-            margin-top: 0.25rem;
+            margin-bottom: 0.5rem;
+        }
+        .recovery-substepper {
+            display: flex;
+            gap: 0.3rem;
+            flex-wrap: wrap;
+        }
+        .recovery-step {
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 0.3rem 0.55rem;
+            border-radius: 999px;
+            border: 1px solid #cbd5e0;
+            color: #718096;
+            background: #ffffff;
+        }
+        .recovery-step.active {
+            color: #9c4221;
+            border-color: #ed8936;
+            background: #fffaf0;
+        }
+        .recovery-step.done {
+            color: #276749;
+            border-color: #68d391;
+            background: #f0fff4;
         }
         </style>
         """,
@@ -92,246 +116,397 @@ def inject_control_styles() -> None:
     )
 
 
-def recovery_landing_complete(motors: list) -> bool:
-    return all(m.speed_pct <= 0.01 for m in motors if not m.stalled)
+def recovery_landing_complete(snap) -> bool:
+    if snap.mode != FlightMode.RECOVERY_LANDING:
+        return False
+    return snap.recovery_phase == RecoveryPhase.COMPLETE
 
 
-def render_motor_rpm_chart(motors: list) -> None:
-    motor_labels = [f"M{m.index}" for m in motors]
-    rpm_values = [speed_pct_to_rpm(m.speed_pct) for m in motors]
-    max_rpm = max(rpm_values, default=0.0)
+SEQUENCE_STEPS: tuple[str, ...] = (
+    "Motors on",
+    "Motor stall detected",
+    "Calculating safe descent path",
+    "Descending",
+    "Touchdown",
+    "Review",
+)
+
+CHART_PHASE_LABELS = ("Stall", "Calc path", "Descend", "Touchdown")
+CHART_PHASE_COLORS = ("#fca5a5", "#cbd5e1", "#7dd3fc", "#6ee7b7")
+CHART_PHASE_OPACITY = 0.48
+
+
+def active_sequence_index(snap) -> int:
+    if snap.mode == FlightMode.OFF:
+        return -1
+    if snap.mode == FlightMode.RUNNING:
+        return 0
+    if snap.mode == FlightMode.RECOVERY_LANDING:
+        phase_to_idx = {
+            RecoveryPhase.FAULT_DETECTED: 1,
+            RecoveryPhase.CALCULATING: 2,
+            RecoveryPhase.DESCEND: 3,
+            RecoveryPhase.TOUCHDOWN: 4,
+            RecoveryPhase.COMPLETE: 5,
+        }
+        return phase_to_idx.get(snap.recovery_phase, 1)
+    return -1
+
+
+def recovery_overall_progress(snap) -> float:
+    if snap.recovery_phase == RecoveryPhase.COMPLETE:
+        return 1.0
+    if snap.mode != FlightMode.RECOVERY_LANDING:
+        return 0.0
+
+    elapsed = 0.0
+    for duration, phase in RECOVERY_PHASES:
+        if phase == snap.recovery_phase:
+            elapsed += duration * snap.recovery_progress
+            break
+        elapsed += duration
+    return min(1.0, elapsed / RECOVERY_DURATION_S)
+
+
+def _record_recovery_chart_start(snap) -> None:
+    if snap.mode != FlightMode.RECOVERY_LANDING:
+        return
+    if st.session_state.get("recovery_chart_started_at") is not None:
+        return
+    if snap.events:
+        st.session_state.recovery_chart_started_at = snap.events[-1].timestamp_ns / 1e9
+
+
+def _recovery_phase_regions_df(recovery_start_elapsed: float, y_max: float) -> pd.DataFrame:
+    rows = []
+    cursor = recovery_start_elapsed
+    for (duration, _), label in zip(RECOVERY_PHASES, CHART_PHASE_LABELS):
+        rows.append(
+            {
+                "start": cursor,
+                "end": cursor + duration,
+                "phase": label,
+                "y_min": 0.0,
+                "y_max": y_max,
+            }
+        )
+        cursor += duration
+    return pd.DataFrame(rows)
+
+
+def render_mission_sequence(snap) -> None:
+    active_idx = active_sequence_index(snap)
+    sub_pills = []
+    for idx, label in enumerate(SEQUENCE_STEPS):
+        css_class = "recovery-step"
+        if active_idx >= 0:
+            if idx < active_idx:
+                css_class += " done"
+            elif idx == active_idx:
+                css_class += " active"
+        sub_pills.append(f'<span class="{css_class}">{label}</span>')
+
+    st.markdown(
+        f'<div class="recovery-stepper-block">'
+        f'<div class="recovery-stepper-label">Recovery sequence</div>'
+        f'<div class="recovery-substepper">{"".join(sub_pills)}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if snap.mode == FlightMode.RECOVERY_LANDING and snap.recovery_phase != RecoveryPhase.COMPLETE:
+        st.progress(recovery_overall_progress(snap), text="Recovery progress")
+
+
+def append_rpm_history(snap) -> None:
+    if st.session_state.get("demo_frozen"):
+        return
+
+    if "rpm_history" not in st.session_state:
+        st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
+
+    _record_recovery_chart_start(snap)
+
+    now = time.time()
+    row: dict = {"time": now}
+    for motor in snap.motors:
+        row[f"M{motor.index}"] = speed_pct_to_rpm(motor.speed_pct)
+    st.session_state.rpm_history.append(row)
+
+    if snap.mode == FlightMode.RECOVERY_LANDING:
+        return
+
+    cutoff = now - TREND_WINDOW_S
+    while st.session_state.rpm_history and st.session_state.rpm_history[0]["time"] < cutoff:
+        st.session_state.rpm_history.popleft()
+
+
+def render_rpm_trend_chart(snap) -> None:
+    history = st.session_state.get("rpm_history", deque())
+    if not history:
+        st.caption("RPM trend will appear once telemetry is streaming.")
+        return
+
+    df = pd.DataFrame(list(history))
+    if df.empty:
+        return
+
+    t0 = df["time"].iloc[0]
+    df["elapsed_s"] = df["time"] - t0
+
+    motor_cols = [f"M{i}" for i in range(1, NUM_MOTORS + 1)]
+    long_df = df.melt(id_vars=["elapsed_s"], value_vars=motor_cols, var_name="Motor", value_name="RPM")
+    stalled_label = f"M{snap.stalled_motor}" if snap.stalled_motor else None
+
+    color_range = [MOTOR_COLORS[i] for i in range(1, NUM_MOTORS + 1)]
+    motor_domain = motor_cols
+    if stalled_label:
+        color_range[motor_domain.index(stalled_label)] = "#e53e3e"
+
+    max_rpm = float(long_df["RPM"].max()) if not long_df.empty else 0.0
     if max_rpm > MOTOR_MAX_RPM * 0.8:
         y_max = MOTOR_MAX_RPM
     else:
         y_max = min(MOTOR_MAX_RPM, max(1_000.0, max_rpm * 1.2))
 
-    chart_df = pd.DataFrame({"Motor": motor_labels, "RPM": rpm_values})
-    chart = (
-        alt.Chart(chart_df)
-        .mark_bar()
-        .encode(
-            x=alt.X("Motor:N", sort=motor_labels, title=None),
-            y=alt.Y("RPM:Q", scale=alt.Scale(domain=[0, y_max]), title="RPM"),
-            color=alt.Color(
-                "Motor:N",
-                scale=alt.Scale(domain=motor_labels, range=[MOTOR_COLORS[m.index] for m in motors]),
-                legend=None,
-            ),
-            tooltip=["Motor", alt.Tooltip("RPM", format=",.0f")],
+    x_max = max(float(df["elapsed_s"].max()), RPM_CHART_X_MAX_S)
+    recovery_start = st.session_state.get("recovery_chart_started_at")
+    if recovery_start is not None:
+        recovery_start_elapsed = recovery_start - t0
+        regions_df = _recovery_phase_regions_df(recovery_start_elapsed, y_max)
+        x_max = max(x_max, float(regions_df["end"].max()))
+
+    line_stroke = 2.25
+    line_encode = {
+        "x": alt.X("elapsed_s:Q", title="Seconds", scale=alt.Scale(domain=[0, x_max])),
+        "y": alt.Y("RPM:Q", title="RPM", scale=alt.Scale(domain=[0, y_max], zero=True)),
+        "color": alt.Color(
+            "Motor:N",
+            scale=alt.Scale(domain=motor_domain, range=color_range),
+            legend=alt.Legend(title="Motor"),
+        ),
+        "tooltip": ["Motor", alt.Tooltip("RPM", format=",.0f"), alt.Tooltip("elapsed_s", format=".1f")],
+    }
+    if stalled_label:
+        line_encode["strokeDash"] = alt.condition(
+            alt.datum.Motor == stalled_label,
+            alt.value([8, 4]),
+            alt.value([]),
         )
-        .properties(height=320)
+
+    lines = alt.Chart(long_df).encode(**line_encode).mark_line(strokeWidth=line_stroke, opacity=1.0)
+
+    chart_layers = []
+    if recovery_start is not None:
+        phase_chart = (
+            alt.Chart(regions_df)
+            .mark_rect(opacity=CHART_PHASE_OPACITY)
+            .encode(
+                x=alt.X("start:Q", scale=alt.Scale(domain=[0, x_max])),
+                x2="end:Q",
+                y=alt.Y("y_min:Q", scale=alt.Scale(domain=[0, y_max], zero=True)),
+                y2="y_max:Q",
+                color=alt.Color(
+                    "phase:N",
+                    scale=alt.Scale(domain=list(CHART_PHASE_LABELS), range=list(CHART_PHASE_COLORS)),
+                    legend=alt.Legend(title="Phase", orient="top", direction="horizontal"),
+                ),
+                tooltip=[
+                    alt.Tooltip("phase:N", title="Phase"),
+                    alt.Tooltip("start:Q", title="Start (s)", format=".1f"),
+                    alt.Tooltip("end:Q", title="End (s)", format=".1f"),
+                ],
+            )
+        )
+        chart_layers.append(phase_chart)
+
+    chart_layers.append(lines)
+
+    chart = (
+        alt.layer(*chart_layers)
+        .resolve_scale(color="independent", x="shared", y="shared")
+        .properties(height=400)
     )
     st.altair_chart(chart, width="stretch")
 
 
-def render_event_log(events: list) -> None:
-    if not events:
-        return
-    for event in reversed(events):
-        ts = time.strftime("%H:%M:%S", time.localtime(event.timestamp_ns / 1e9))
-        st.markdown(
-            f"`{ts}` **Motor {event.motor} stall** — peak **{event.peak_current_a:.1f} A**. "
-            f"{event.message}"
-        )
-
-
-def render_motor_metric(motor_idx: int, speed_rpm: float, current_a: float, stalled: bool, enabled: bool) -> None:
-    color = MOTOR_COLORS.get(motor_idx, "#4a5568")
-    status = "Running"
-    if stalled:
-        status = "Stalled / isolated"
-    elif not enabled:
-        status = "Off"
-
-    st.markdown(
-        f"""
-        <div class="motor-metric-card">
-            <div class="motor-metric-title">Motor {motor_idx}</div>
-            <div class="motor-metric-rpm" style="color: {color};">{speed_rpm:,.0f} RPM</div>
-            <div class="motor-metric-sub">{status} · {current_a:.2f} A</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_controls(snap, bench: BenchSupervisor) -> None:
-    st.markdown("### Controls")
-
-    power_col, throttle_col, fault_col = st.columns(3)
-
-    with power_col:
-        with st.container(border=True):
-            st.markdown('<div class="control-card-title">Power On / Off</div>', unsafe_allow_html=True)
+def render_top_controls(snap, bench: BenchSupervisor) -> None:
+    with st.container(horizontal=True, border=True):
+        with st.container():
+            st.markdown("**Step 1: Power on/off**")
             if snap.mode == FlightMode.OFF:
-                if st.button("Power On", type="primary", use_container_width=True, key="power_on"):
+                if st.button("Power on", type="primary", key="power_on"):
                     bench.power_on()
-                    st.session_state.pop("throttle_input", None)
+                    clear_demo_session()
                     st.rerun()
             else:
-                if st.button("Power Off", use_container_width=True, key="power_off"):
+                if st.button("Power off", key="power_off"):
                     bench.power_off()
-                    st.session_state.pop("throttle_input", None)
+                    clear_demo_session()
                     st.rerun()
-                if snap.mode == FlightMode.RECOVERY_LANDING and recovery_landing_complete(snap.motors):
-                    if st.button("Start New Preflight", type="primary", use_container_width=True, key="new_preflight"):
+                if recovery_landing_complete(snap):
+                    if st.button("Start new preflight", type="primary", key="new_preflight"):
                         bench.power_off()
                         bench.power_on()
-                        st.session_state.pop("throttle_input", None)
+                        clear_demo_session()
                         st.rerun()
 
-    with throttle_col:
-        with st.container(border=True):
-            st.markdown('<div class="control-card-title">Motor Throttle %</div>', unsafe_allow_html=True)
-            if snap.mode == FlightMode.RUNNING:
-                if "throttle_input" not in st.session_state:
-                    st.session_state.throttle_input = int(snap.throttle_pct)
-                st.number_input(
-                    "Throttle",
-                    min_value=0,
-                    max_value=100,
-                    key="throttle_input",
-                    label_visibility="collapsed",
-                    on_change=lambda: get_bench().set_throttle(float(st.session_state.throttle_input)),
-                )
-            else:
-                st.number_input(
-                    "Throttle",
-                    min_value=0,
-                    max_value=100,
-                    value=int(snap.throttle_pct),
-                    disabled=True,
-                    label_visibility="collapsed",
-                )
-
-    with fault_col:
-        with st.container(border=True):
-            st.markdown('<div class="control-card-title">Fault Injection</div>', unsafe_allow_html=True)
+        with st.container():
+            st.markdown("**Step 2: Inject Motor Fault**")
+            motor_options = list(range(1, NUM_MOTORS + 1))
+            if "fault_motor" not in st.session_state:
+                st.session_state.fault_motor = 1
+            st.selectbox(
+                "Motor",
+                motor_options,
+                format_func=lambda m: f"Motor {m}",
+                key="fault_motor",
+                label_visibility="collapsed",
+            )
             fault_disabled = snap.mode != FlightMode.RUNNING
-            top_row = st.columns(2)
-            bottom_row = st.columns(2)
-            for col, motor_idx in zip(top_row, (1, 2)):
-                with col:
-                    if st.button(
-                        f"M{motor_idx}",
-                        disabled=fault_disabled,
-                        use_container_width=True,
-                        key=f"inject_stall_m{motor_idx}",
-                    ):
-                        bench.inject_stall(motor_idx)
-                        st.rerun()
-            for col, motor_idx in zip(bottom_row, (3, 4)):
-                with col:
-                    if st.button(
-                        f"M{motor_idx}",
-                        disabled=fault_disabled,
-                        use_container_width=True,
-                        key=f"inject_stall_m{motor_idx}",
-                    ):
-                        bench.inject_stall(motor_idx)
-                        st.rerun()
-
-
-def render_motor_data(snap) -> None:
-    if snap.mode == FlightMode.OFF:
-        st.info("Power on the bench to stream motor speed data.")
-        return
-
-    if snap.mode == FlightMode.RECOVERY_LANDING:
-        if recovery_landing_complete(snap.motors):
-            st.success(
-                "Safe landing complete — all motors stopped. "
-                "Use **Start New Preflight** to run another test."
-            )
-        else:
-            st.warning(
-                "Motor stall detected — fault logged, stalled channel isolated, "
-                "recovery landing in progress (ramping motors to zero)"
-            )
-    elif snap.mode == FlightMode.RUNNING:
-        if snap.throttle_pct <= 0:
-            st.info("Increase throttle to spin the motors.")
-        else:
-            st.success(f"Systems running — throttle {snap.throttle_pct:.0f}%")
-
-    chart_col, schematic_col = st.columns([3, 2])
-    with chart_col:
-        render_motor_rpm_chart(snap.motors)
-    with schematic_col:
-        render_quadcopter_schematic(snap.motors, snap.mode)
-
-    max_rpm = max((speed_pct_to_rpm(m.speed_pct) for m in snap.motors), default=0.0)
-    if max_rpm > MOTOR_MAX_RPM * 0.8:
-        scale_note = f"0 to {MOTOR_MAX_RPM:,.0f} RPM full scale"
-    else:
-        scale_note = f"Auto-scaled for visibility (full scale 0 to {MOTOR_MAX_RPM:,.0f} RPM)"
-    st.caption(f"Live tachometer readings — {scale_note}")
-
-    metric_cols = st.columns(4)
-    for col, motor in zip(metric_cols, snap.motors):
-        with col:
-            render_motor_metric(
-                motor.index,
-                speed_pct_to_rpm(motor.speed_pct),
-                motor.current_a,
-                motor.stalled,
-                motor.enabled,
-            )
-
-
-@st.fragment
-def bench_controls() -> None:
-    """Interactive controls — isolated so they never trigger full-app reruns."""
-    bench = get_bench()
-    snap = bench.snapshot()
-    render_controls(snap, bench)
-
-    if snap.events:
-        with st.expander("Event log", expanded=False):
-            render_event_log(snap.events)
+            selected_motor = st.session_state.fault_motor
+            if st.button(
+                f"Stall motor {selected_motor}",
+                disabled=fault_disabled,
+                key="inject_stall",
+            ):
+                bench.inject_stall(selected_motor)
+                st.rerun()
 
 
 @st.fragment(run_every=0.15)
-def live_motor_data() -> None:
-    """Read-only telemetry with auto-refresh (no widgets — safe with run_every)."""
-    snap = get_bench().snapshot()
-    render_motor_data(snap)
+def live_mission_sequence() -> None:
+    snap = get_display_snapshot()
+    render_mission_sequence(snap)
+
+
+@st.fragment(run_every=0.15)
+def live_visuals() -> None:
+    if st.session_state.get("demo_frozen"):
+        snap = st.session_state.frozen_snapshot
+    else:
+        snap = get_bench().snapshot()
+
+    if snap.mode != FlightMode.OFF and not st.session_state.get("demo_frozen"):
+        append_rpm_history(snap)
+        maybe_freeze_demo(snap)
+
+    schematic_col, chart_col = st.columns([1, 3])
+    with schematic_col:
+        st.markdown("#### Octocopter")
+        with st.container(border=True):
+            render_octocopter_schematic(
+                snap.motors,
+                snap.mode,
+                recovery_phase=snap.recovery_phase,
+                selected_motor=st.session_state.get("fault_motor"),
+            )
+    with chart_col:
+        st.markdown("#### RPM trend")
+        render_rpm_trend_chart(snap)
+        if st.session_state.get("demo_frozen"):
+            st.caption("Timeline paused at touchdown — review how each motor responded during recovery.")
+        else:
+            st.caption("Live tachometer readings — stalled motor highlighted in red.")
+
+
+def render_instro_faq_section() -> None:
+    st.divider()
+    st.markdown('## Nominal Instro FAQ')
+
+    with st.container(border=True):
+        with st.expander("What is Nominal Instro?"):
+            st.markdown(
+                "[Nominal Instro](https://github.com/nominal-io/instro) is a Python library for talking to test-and-measurement instruments "
+                "(power supplies, multimeters, electronic loads, DAQs, oscilloscopes, PLCs) from a "
+                "unified, typed API."
+            )
+            st.markdown(
+                "Install with `pip install instro` (Python 3.10–3.13). "
+                "This demo uses **`InstroDAQ`** with a simulated LabJack T7 driver — "
+                "the same class you'd use on a real bench."
+            )
+
+        with st.expander("Why is it useful?"):
+            st.markdown(
+                "Instro gives you one consistent pattern across instrument types: construct, `open()`, "
+                "configure, measure, `close()`. Test logic talks to Instro classes (`InstroPSU`, "
+                "`InstroDAQ`, `InstroDMM`, …) instead of vendor-specific APIs, so you swap drivers "
+                "without rewriting your workflow."
+            )
+            st.markdown(
+                "- **Simulated drivers** — develop and demo without hardware (this app runs entirely in-process)\n"
+                "- **Optional extras** — install only the vendor SDKs you need, e.g. `pip install \"instro[labjack]\"`\n"
+                "- **Publishers** — stream measurements to a file, a custom destination, or [Nominal](https://nominal.io)\n"
+                "- **Typed channels** — aliases, scaling, and structured reads (see `bench_supervisor.py` calling "
+                "`configure_analog_channel()`, `write_analog_value()`, and `read_analog()` at 10 Hz)"
+            )
+            st.markdown(
+                "In this demo, stall detection and recovery landing react to real `read_analog()` "
+                "measurements — the supervisor never bypasses Instro to peek at the physics model."
+            )
+
+        with st.expander("What devices does it support?"):
+            st.markdown(
+                "Instro ships drivers for common bench equipment. Vendor-specific SDKs are optional "
+                "extras; community-contributed drivers live in [`instro-contrib`](https://pypi.org/project/instro-contrib/) "
+                "(`pip install \"instro[contrib]\"`)."
+            )
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        ("Power supply", "InstroPSU", "B&K Precision (9115, 914X), Keysight (E36100-series), Rigol (DP800-series), Siglent (SPD3303), TDK Lambda (Genesys), simulated"),
+                        ("Multimeter", "InstroDMM", "Agilent 34401A, Keithley 2400, Keithley 2750 (unstable)"),
+                        ("Electronic load", "InstroELoad", "B&K Precision (85xxB-series)"),
+                        ("Oscilloscope", "InstroScope", "Keysight (1200X-series), Tektronix (2-series), Siglent (SDS1000X-E)"),
+                        ("DAQ", "InstroDAQ", "Keysight 34980A, NI-DAQmx, LabJack T-series, MCC USB-series"),
+                        ("I2C", "I2CInterface", "Total Phase Aardvark"),
+                        ("Modbus", "ModbusDevice", "Any Modbus TCP / RTU device"),
+                        ("EtherNet/IP", "EtherNetIPDevice", "Allen-Bradley / CompactLogix-class PLCs"),
+                    ],
+                    columns=["Category", "Class", "Vendors"],
+                ),
+                column_config={
+                    "Category": st.column_config.TextColumn("Category", width="small"),
+                    "Class": st.column_config.TextColumn("Class", width="small"),
+                    "Vendors": st.column_config.TextColumn("Vendors", width="large"),
+                },
+                hide_index=True,
+            )
+            st.caption(
+                "This demo uses InstroDAQ + LabJack T-series. Swap `SimulatedLabJackT7` for "
+                "`LabJackTSeriesDriver` in `bench_supervisor.py` to run on hardware."
+            )
 
 
 def main() -> None:
-    st.set_page_config(page_title="Drone Motor Bench", page_icon="🛸", layout="wide")
-    inject_control_styles()
+    st.set_page_config(
+        page_title="Octocopter motor bench | Nominal Instro",
+        page_icon=":material/sensors:",
+        layout="wide",
+    )
+    inject_styles()
 
-    st.title("Drone Motor Bench")
-    st.caption(
-        "Preflight power check via InstroDAQ — stall detection and autonomous recovery landing "
-        "(simulated LabJack T7 + LJTick-DAC)"
+    st.markdown("# Octocopter motor failure testbench - Powered by Nominal Instro")
+    st.markdown(
+        "This app is designed to test the recovery logic for our octocopter. Start the motors, "
+        "choose one to inject a fault into, and watch the system safely execute a simulated "
+        "landing sequence using the remaining working motors."
     )
 
-    bench_controls()
-
-    st.divider()
-    st.subheader("Motor data")
-    live_motor_data()
-
-    st.divider()
-    st.subheader("Nominal Instro")
-    with st.expander("How this uses instro"):
-        st.code(
-            """from instro.daq import InstroDAQ
-from simulated_labjack import SimulatedLabJackT7
-# from instro.daq.drivers.labjack import LabJackTSeriesDriver  # real bench
-
-driver = SimulatedLabJackT7(device_id="470010000")
-# driver = LabJackTSeriesDriver(device_id="470010000")  # swap for hardware
-
-daq = InstroDAQ(name="drone_bench", driver=driver)
-daq.open()
-daq.configure_analog_channel(Direction.OUTPUT, "DAC0", alias="m1_cmd", range_min=0, range_max=5)
-daq.write_analog_value("m1_cmd", 3.5)
-measurement = daq.read_analog()  # reads m1_current, m1_tach, ...""",
-            language="python",
+    with st.container(border=True):
+        st.markdown("#### Why Nominal Instro?")
+        st.markdown(
+            "I wanted to develop on a simulated bench and deploy on real hardware without rewriting "
+            "test logic. [Nominal Instro](https://github.com/nominal-io/instro) is a hardware abstraction layer that lets me swap out the hardware underneath without rewriting the test logic. "
+            "I use `SimulatedLabJackT7` for this demo, and `LabJackTSeriesDriver` on the actual rig. "
+            "Same aliases, same reads and writes, different hardware."
         )
+
+    snap = get_display_snapshot()
+    render_top_controls(snap, get_bench())
+    live_mission_sequence()
+    live_visuals()
+    render_instro_faq_section()
 
 
 if __name__ == "__main__":
