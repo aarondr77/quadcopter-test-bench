@@ -240,39 +240,6 @@ def render_rpm_trend_chart(snap) -> None:
     st.altair_chart(chart, width="stretch")
 
 
-def render_motor_detail_table(motors: list) -> None:
-    rows = []
-    for motor in motors:
-        status = "Running"
-        if motor.stalled:
-            status = "Stalled / isolated"
-        elif not motor.enabled:
-            status = "Off"
-        elif motor.speed_pct <= 0.01:
-            status = "Idle"
-        rows.append(
-            {
-                "Motor": f"M{motor.index}",
-                "RPM": f"{speed_pct_to_rpm(motor.speed_pct):,.0f}",
-                "Current (A)": f"{motor.current_a:.2f}",
-                "Status": status,
-            }
-        )
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
-
-def render_event_log(events: list) -> None:
-    if not events:
-        st.caption("No faults recorded.")
-        return
-    for event in reversed(events):
-        ts = time.strftime("%H:%M:%S", time.localtime(event.timestamp_ns / 1e9))
-        st.markdown(
-            f"`{ts}` **Motor {event.motor} stall** — peak **{event.peak_current_a:.1f} A**. "
-            f"{event.message}"
-        )
-
-
 def render_controls_column(snap, bench: BenchSupervisor) -> None:
     st.markdown("#### Controls")
 
@@ -406,14 +373,6 @@ def live_telemetry() -> None:
         st.caption("Timeline paused at touchdown — review how each motor responded during recovery.")
     else:
         st.caption("Live tachometer readings — stalled motor highlighted in red.")
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        with st.expander("Event log", expanded=bool(snap.events)):
-            render_event_log(snap.events)
-    with col_b:
-        with st.expander("Motor detail", expanded=False):
-            render_motor_detail_table(snap.motors)
 
 
 def main() -> None:
