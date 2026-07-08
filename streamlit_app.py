@@ -61,31 +61,6 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
-        .mission-stepper {
-            display: flex;
-            gap: 0.35rem;
-            flex-wrap: wrap;
-            margin: 0.5rem 0 1rem 0;
-        }
-        .mission-step {
-            font-size: 0.78rem;
-            font-weight: 600;
-            padding: 0.35rem 0.65rem;
-            border-radius: 999px;
-            border: 1px solid #e2e8f0;
-            color: #718096;
-            background: #f7fafc;
-        }
-        .mission-step.active {
-            color: #1a365d;
-            border-color: #3182ce;
-            background: #ebf8ff;
-        }
-        .mission-step.done {
-            color: #276749;
-            border-color: #68d391;
-            background: #f0fff4;
-        }
         .recovery-stepper-block {
             margin: 0.75rem 0 1rem 0;
             padding: 0.75rem 0.85rem;
@@ -125,14 +100,6 @@ def inject_styles() -> None:
             border-color: #68d391;
             background: #f0fff4;
         }
-        .status-metric {
-            font-size: 0.85rem;
-            color: #4a5568;
-            margin-bottom: 0.35rem;
-        }
-        .status-metric strong {
-            color: #2d3748;
-        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -143,10 +110,6 @@ def recovery_landing_complete(snap) -> bool:
     if snap.mode != FlightMode.RECOVERY_LANDING:
         return False
     return snap.recovery_phase == RecoveryPhase.COMPLETE
-
-
-def active_motor_count(motors: list) -> int:
-    return sum(1 for m in motors if m.enabled and not m.stalled and m.speed_pct > 0.01)
 
 
 RECOVERY_STEPS: tuple[tuple[RecoveryPhase, str], ...] = (
@@ -161,14 +124,6 @@ RECOVERY_STEPS: tuple[tuple[RecoveryPhase, str], ...] = (
 CHART_PHASE_LABELS = ("Error", "Calc", "Apply", "Descend", "Touchdown")
 CHART_PHASE_COLORS = ("#fca5a5", "#cbd5e1", "#fcd34d", "#7dd3fc", "#6ee7b7")
 CHART_PHASE_OPACITY = 0.48
-
-
-def mission_step_index(snap) -> int:
-    if snap.mode == FlightMode.OFF:
-        return 0
-    if snap.mode == FlightMode.RUNNING and snap.throttle_pct <= 0:
-        return 1
-    return 2
 
 
 def recovery_step_index(snap) -> int:
@@ -223,22 +178,7 @@ def _recovery_phase_regions_df(recovery_start_elapsed: float, y_max: float) -> p
     return pd.DataFrame(rows)
 
 
-def render_mission_stepper(snap) -> None:
-    main_steps = ["Bench off", "Preflight", "Hover check"]
-    main_active = mission_step_index(snap)
-    if in_recovery_story(snap):
-        main_active = len(main_steps)
-
-    pills = []
-    for idx, label in enumerate(main_steps):
-        css_class = "mission-step"
-        if idx < main_active:
-            css_class += " done"
-        elif idx == main_active and not in_recovery_story(snap):
-            css_class += " active"
-        pills.append(f'<span class="{css_class}">{label}</span>')
-    st.markdown(f'<div class="mission-stepper">{"".join(pills)}</div>', unsafe_allow_html=True)
-
+def render_recovery_stepper(snap) -> None:
     if not in_recovery_story(snap):
         return
 
@@ -285,15 +225,15 @@ def render_story_banner(snap) -> None:
         if snap.recovery_phase == RecoveryPhase.FAULT_DETECTED:
             st.error(f"**Motor {motor} error detected** — channel isolated.")
         elif snap.recovery_phase == RecoveryPhase.CALCULATING:
-            st.warning("Calculating safe descent motor cadence…")
+            st.warning("Calculating safe descent with remaining motors...")
         elif snap.recovery_phase == RecoveryPhase.APPLYING:
             st.warning(f"Applying safe motor cadence to the **7 remaining motors**.")
         elif snap.recovery_phase == RecoveryPhase.DESCEND:
-            st.warning("Controlled descent in progress — motors remain powered.")
+            st.warning("Controlled descent in progress.")
         elif snap.recovery_phase == RecoveryPhase.TOUCHDOWN:
-            st.warning("Touchdown — reducing motor power.")
+            st.warning("Touchdown. Shutting down motors.")
         else:
-            st.warning(f"Motor {motor} error — recovery landing in progress.")
+            st.warning(f"Motor {motor} error. Recovery landing in progress.")
 
 
 def append_rpm_history(snap) -> None:
@@ -462,44 +402,15 @@ def render_controls_column(snap, bench: BenchSupervisor) -> None:
         label_visibility="collapsed",
     )
     fault_disabled = snap.mode != FlightMode.RUNNING
-    if st.button("Inject stall", disabled=fault_disabled, key="inject_stall"):
-        bench.inject_stall(st.session_state.fault_motor)
+    selected_motor = st.session_state.fault_motor
+    if st.button(
+        f"Stall Motor {selected_motor}",
+        disabled=fault_disabled,
+        key="inject_stall",
+        use_container_width=True,
+    ):
+        bench.inject_stall(selected_motor)
         st.rerun()
-
-
-def render_status_column(snap) -> None:
-    st.markdown("#### Status")
-    if snap.mode == FlightMode.OFF:
-        st.markdown('<p class="status-metric">Flight mode: <strong>OFF</strong></p>', unsafe_allow_html=True)
-    elif snap.mode == FlightMode.RUNNING:
-        st.markdown('<p class="status-metric">Flight mode: <strong>RUNNING</strong></p>', unsafe_allow_html=True)
-    else:
-        st.markdown('<p class="status-metric">Flight mode: <strong>RECOVERY LANDING</strong></p>', unsafe_allow_html=True)
-
-    active = active_motor_count(snap.motors)
-    st.markdown(
-        f'<p class="status-metric">Active motors: <strong>{active} / {NUM_MOTORS}</strong></p>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<p class="status-metric">Collective throttle: <strong>{snap.throttle_pct:.0f}%</strong></p>',
-        unsafe_allow_html=True,
-    )
-
-    if snap.mode == FlightMode.RECOVERY_LANDING and snap.recovery_phase != RecoveryPhase.NONE:
-        phase_labels = {
-            RecoveryPhase.FAULT_DETECTED: "Error detected",
-            RecoveryPhase.CALCULATING: "Calculating cadence",
-            RecoveryPhase.APPLYING: "Applying cadence",
-            RecoveryPhase.DESCEND: "Controlled descent",
-            RecoveryPhase.TOUCHDOWN: "Touchdown",
-            RecoveryPhase.COMPLETE: "Landed",
-        }
-        phase_label = phase_labels.get(snap.recovery_phase, snap.recovery_phase.value)
-        st.markdown(
-            f'<p class="status-metric">Recovery phase: <strong>{phase_label}</strong></p>',
-            unsafe_allow_html=True,
-        )
 
 
 @st.fragment
@@ -531,8 +442,7 @@ def live_telemetry() -> None:
     if snap.mode != FlightMode.OFF:
         append_rpm_history(snap)
 
-    render_mission_stepper(snap)
-    render_status_column(snap)
+    render_recovery_stepper(snap)
     render_story_banner(snap)
 
     st.markdown("#### RPM trend")
