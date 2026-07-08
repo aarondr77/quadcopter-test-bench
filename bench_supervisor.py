@@ -12,25 +12,24 @@ from instro.daq import InstroDAQ
 from instro.daq.scaling.scaling import LinearScaler
 from instro.daq.types import Direction
 
-from drone_physics import CMD_VOLTAGE_MAX, NUM_MOTORS, STALL_CURRENT_A
+from drone_physics import CMD_VOLTAGE_MAX, NUM_MOTORS, SPEED_ZERO_THRESHOLD_PCT, STALL_CURRENT_A
 from simulated_labjack import SimulatedLabJackT7
 
 logger = logging.getLogger(__name__)
 
 FAULT_DETECTED_DURATION_S = 1.0
 CALCULATING_DURATION_S = 5.0
-APPLYING_DURATION_S = 8.0
 DESCEND_DURATION_S = 22.0
 TOUCHDOWN_DURATION_S = 5.0
 RECOVERY_DURATION_S = (
     FAULT_DETECTED_DURATION_S
     + CALCULATING_DURATION_S
-    + APPLYING_DURATION_S
     + DESCEND_DURATION_S
     + TOUCHDOWN_DURATION_S
 )
 DESCEND_FRACTION = 0.45
 TICK_INTERVAL_S = 0.1
+POWER_ON_THROTTLE_PCT = 10.0
 
 MOTOR_CMD_ALIASES = tuple(f"m{i}_cmd" for i in range(1, NUM_MOTORS + 1))
 MOTOR_CURRENT_ALIASES = tuple(f"m{i}_current" for i in range(1, NUM_MOTORS + 1))
@@ -53,7 +52,6 @@ class RecoveryPhase(str, Enum):
     NONE = "none"
     FAULT_DETECTED = "fault_detected"
     CALCULATING = "calculating"
-    APPLYING = "applying"
     DESCEND = "descend"
     TOUCHDOWN = "touchdown"
     COMPLETE = "complete"
@@ -62,7 +60,6 @@ class RecoveryPhase(str, Enum):
 RECOVERY_PHASES: tuple[tuple[float, RecoveryPhase], ...] = (
     (FAULT_DETECTED_DURATION_S, RecoveryPhase.FAULT_DETECTED),
     (CALCULATING_DURATION_S, RecoveryPhase.CALCULATING),
-    (APPLYING_DURATION_S, RecoveryPhase.APPLYING),
     (DESCEND_DURATION_S, RecoveryPhase.DESCEND),
     (TOUCHDOWN_DURATION_S, RecoveryPhase.TOUCHDOWN),
 )
@@ -206,8 +203,15 @@ class BenchSupervisor:
         assert self._recovery_started_ns is not None
         return (time.time_ns() - self._recovery_started_ns) * 1e-9
 
+    def _motors_at_rest(self) -> bool:
+        return all(
+            m.stalled or m.speed_pct <= SPEED_ZERO_THRESHOLD_PCT for m in self._motors
+        )
+
     def _recovery_phase_and_progress(self, elapsed_s: float) -> tuple[RecoveryPhase, float]:
         if elapsed_s >= RECOVERY_DURATION_S:
+            if not self._motors_at_rest():
+                return RecoveryPhase.TOUCHDOWN, 1.0
             return RecoveryPhase.COMPLETE, 1.0
 
         phase_start = 0.0
@@ -231,8 +235,6 @@ class BenchSupervisor:
             return self._hover_voltage(motor)
 
         compensate_v = self._compensate_voltage(motor)
-        if phase == RecoveryPhase.APPLYING:
-            return compensate_v
         if phase == RecoveryPhase.DESCEND:
             descend_end = compensate_v * DESCEND_FRACTION
             return compensate_v + (descend_end - compensate_v) * phase_progress
@@ -360,7 +362,7 @@ class BenchSupervisor:
         self._driver.plant.reset()
         with self._lock:
             self._mode = FlightMode.RUNNING
-            self._throttle_pct = 0.0
+            self._throttle_pct = POWER_ON_THROTTLE_PCT
             self._events.clear()
             self._recovery_started_ns = None
             self._stalled_motor = None

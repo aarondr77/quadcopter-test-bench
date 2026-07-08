@@ -43,13 +43,13 @@ _ARMS_SVG = "\n      ".join(
 
 _SCHEMATIC_HTML = f"""
 <div class="octo-schematic-root">
-  <svg id="octo-svg" viewBox="0 0 300 300" role="img" aria-label="Octocopter top-down schematic">
+  <svg id="octo-svg" viewBox="0 0 300 330" role="img" aria-label="Octocopter top-down schematic">
     <defs>
       <filter id="prop-blur" x="-50%" y="-50%" width="200%" height="200%">
         <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" />
       </filter>
     </defs>
-    <rect class="octo-bg" x="0" y="0" width="300" height="300" rx="12" />
+    <rect class="octo-bg" x="0" y="0" width="300" height="330" rx="12" />
     <g id="octo-frame">
       {_ARMS_SVG}
       <rect class="body" x="132" y="132" width="36" height="36" rx="8" />
@@ -65,15 +65,15 @@ _SCHEMATIC_HTML = f"""
 _SCHEMATIC_CSS = """
 .octo-schematic-root {
   width: 100%;
-  min-height: 320px;
+  min-height: 420px;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0.5rem 0;
 }
 #octo-svg {
   width: 100%;
-  max-width: 420px;
-  aspect-ratio: 1;
+  height: auto;
   display: block;
 }
 .octo-bg {
@@ -431,7 +431,6 @@ def render_octocopter_schematic(
 ) -> None:
     """Render top-down 8-motor octocopter schematic from motor snapshots."""
     recovering = mode == FlightMode.RECOVERY_LANDING and recovery_phase in (
-        RecoveryPhase.APPLYING,
         RecoveryPhase.DESCEND,
         RecoveryPhase.TOUCHDOWN,
     )
@@ -445,5 +444,5 @@ def render_octocopter_schematic(
     _OCTOCOPTER_COMPONENT(
         data=payload,
         key="octocopter_schematic",
-        height=380,
+        height=480,
     )

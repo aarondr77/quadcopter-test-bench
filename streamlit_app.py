@@ -22,14 +22,21 @@ from octocopter_schematic import MOTOR_COLORS, render_octocopter_schematic
 MOTOR_MAX_RPM = 10_000.0
 TREND_WINDOW_S = 120.0
 TREND_MAX_SAMPLES = 800
+RPM_CHART_X_MAX_S = 50.0
+MOTOR_REST_RPM = 1.0
 
 
 def speed_pct_to_rpm(speed_pct: float) -> float:
     return speed_pct / 100.0 * MOTOR_MAX_RPM
 
 
+def motors_at_rest(snap) -> bool:
+    return all(
+        m.stalled or speed_pct_to_rpm(m.speed_pct) <= MOTOR_REST_RPM for m in snap.motors
+    )
+
+
 def clear_demo_session() -> None:
-    st.session_state.throttle_input = 0
     st.session_state.rpm_history = deque(maxlen=TREND_MAX_SAMPLES)
     st.session_state.pop("demo_frozen", None)
     st.session_state.pop("frozen_snapshot", None)
@@ -41,15 +48,18 @@ def get_display_snapshot():
     if st.session_state.get("demo_frozen") and st.session_state.get("frozen_snapshot"):
         return st.session_state.frozen_snapshot
 
-    snap = get_bench().snapshot()
+    return get_bench().snapshot()
+
+
+def maybe_freeze_demo(snap) -> None:
     if (
         snap.mode == FlightMode.RECOVERY_LANDING
         and snap.recovery_phase == RecoveryPhase.COMPLETE
+        and motors_at_rest(snap)
         and not st.session_state.get("demo_frozen")
     ):
         st.session_state.demo_frozen = True
         st.session_state.frozen_snapshot = snap
-    return snap
 
 
 @st.cache_resource
@@ -112,25 +122,35 @@ def recovery_landing_complete(snap) -> bool:
     return snap.recovery_phase == RecoveryPhase.COMPLETE
 
 
-RECOVERY_STEPS: tuple[tuple[RecoveryPhase, str], ...] = (
-    (RecoveryPhase.FAULT_DETECTED, "Error"),
-    (RecoveryPhase.CALCULATING, "Calculating"),
-    (RecoveryPhase.APPLYING, "Applying"),
-    (RecoveryPhase.DESCEND, "Descending"),
-    (RecoveryPhase.TOUCHDOWN, "Touchdown"),
-    (RecoveryPhase.COMPLETE, "Review"),
+SEQUENCE_STEPS: tuple[str, ...] = (
+    "Motors on",
+    "Motor stall detected",
+    "Calculating safe descent path",
+    "Descending",
+    "Touchdown",
+    "Review",
 )
 
-CHART_PHASE_LABELS = ("Error", "Calc", "Apply", "Descend", "Touchdown")
-CHART_PHASE_COLORS = ("#fca5a5", "#cbd5e1", "#fcd34d", "#7dd3fc", "#6ee7b7")
+CHART_PHASE_LABELS = ("Stall", "Calc path", "Descend", "Touchdown")
+CHART_PHASE_COLORS = ("#fca5a5", "#cbd5e1", "#7dd3fc", "#6ee7b7")
 CHART_PHASE_OPACITY = 0.48
 
 
-def recovery_step_index(snap) -> int:
-    for idx, (phase, _) in enumerate(RECOVERY_STEPS):
-        if snap.recovery_phase == phase:
-            return idx
-    return 0
+def active_sequence_index(snap) -> int:
+    if snap.mode == FlightMode.OFF:
+        return -1
+    if snap.mode == FlightMode.RUNNING:
+        return 0
+    if snap.mode == FlightMode.RECOVERY_LANDING:
+        phase_to_idx = {
+            RecoveryPhase.FAULT_DETECTED: 1,
+            RecoveryPhase.CALCULATING: 2,
+            RecoveryPhase.DESCEND: 3,
+            RecoveryPhase.TOUCHDOWN: 4,
+            RecoveryPhase.COMPLETE: 5,
+        }
+        return phase_to_idx.get(snap.recovery_phase, 1)
+    return -1
 
 
 def recovery_overall_progress(snap) -> float:
@@ -146,10 +166,6 @@ def recovery_overall_progress(snap) -> float:
             break
         elapsed += duration
     return min(1.0, elapsed / RECOVERY_DURATION_S)
-
-
-def in_recovery_story(snap) -> bool:
-    return snap.mode == FlightMode.RECOVERY_LANDING or st.session_state.get("demo_frozen", False)
 
 
 def _record_recovery_chart_start(snap) -> None:
@@ -178,18 +194,16 @@ def _recovery_phase_regions_df(recovery_start_elapsed: float, y_max: float) -> p
     return pd.DataFrame(rows)
 
 
-def render_recovery_stepper(snap) -> None:
-    if not in_recovery_story(snap):
-        return
-
-    recovery_active = recovery_step_index(snap)
+def render_mission_sequence(snap) -> None:
+    active_idx = active_sequence_index(snap)
     sub_pills = []
-    for idx, (_, label) in enumerate(RECOVERY_STEPS):
+    for idx, label in enumerate(SEQUENCE_STEPS):
         css_class = "recovery-step"
-        if idx < recovery_active:
-            css_class += " done"
-        elif idx == recovery_active:
-            css_class += " active"
+        if active_idx >= 0:
+            if idx < active_idx:
+                css_class += " done"
+            elif idx == active_idx:
+                css_class += " active"
         sub_pills.append(f'<span class="{css_class}">{label}</span>')
 
     st.markdown(
@@ -199,41 +213,8 @@ def render_recovery_stepper(snap) -> None:
         f"</div>",
         unsafe_allow_html=True,
     )
-    st.progress(recovery_overall_progress(snap), text="Recovery progress")
-
-
-def render_story_banner(snap) -> None:
-    if snap.mode == FlightMode.OFF:
-        st.info("Bench powered off — click **Power On** to begin preflight.")
-        return
-
-    if snap.mode == FlightMode.RUNNING:
-        if snap.throttle_pct <= 0:
-            st.info("Preflight ready — increase throttle to spin up all 8 motors.")
-        else:
-            st.success(f"All 8 motors nominal at {snap.throttle_pct:.0f}% collective.")
-        return
-
-    if snap.mode == FlightMode.RECOVERY_LANDING:
-        motor = snap.stalled_motor or "?"
-        if recovery_landing_complete(snap):
-            st.success(
-                "Safe landing complete — timeline paused. "
-                "Review the motor cadence chart below, then **Start New Preflight**."
-            )
-            return
-        if snap.recovery_phase == RecoveryPhase.FAULT_DETECTED:
-            st.error(f"**Motor {motor} error detected** — channel isolated.")
-        elif snap.recovery_phase == RecoveryPhase.CALCULATING:
-            st.warning("Calculating safe descent with remaining motors...")
-        elif snap.recovery_phase == RecoveryPhase.APPLYING:
-            st.warning(f"Applying safe motor cadence to the **7 remaining motors**.")
-        elif snap.recovery_phase == RecoveryPhase.DESCEND:
-            st.warning("Controlled descent in progress.")
-        elif snap.recovery_phase == RecoveryPhase.TOUCHDOWN:
-            st.warning("Touchdown. Shutting down motors.")
-        else:
-            st.warning(f"Motor {motor} error. Recovery landing in progress.")
+    if snap.mode == FlightMode.RECOVERY_LANDING and snap.recovery_phase != RecoveryPhase.COMPLETE:
+        st.progress(recovery_overall_progress(snap), text="Recovery progress")
 
 
 def append_rpm_history(snap) -> None:
@@ -287,7 +268,7 @@ def render_rpm_trend_chart(snap) -> None:
     else:
         y_max = min(MOTOR_MAX_RPM, max(1_000.0, max_rpm * 1.2))
 
-    x_max = float(df["elapsed_s"].max())
+    x_max = max(float(df["elapsed_s"].max()), RPM_CHART_X_MAX_S)
     recovery_start = st.session_state.get("recovery_chart_started_at")
     if recovery_start is not None:
         recovery_start_elapsed = recovery_start - t0
@@ -343,124 +324,99 @@ def render_rpm_trend_chart(snap) -> None:
     chart = (
         alt.layer(*chart_layers)
         .resolve_scale(color="independent", x="shared", y="shared")
-        .properties(height=300)
+        .properties(height=400)
     )
     st.altair_chart(chart, width="stretch")
 
 
-def render_controls_column(snap, bench: BenchSupervisor) -> None:
-    st.markdown("#### Controls")
+def render_top_controls(snap, bench: BenchSupervisor) -> None:
+    with st.container(horizontal=True, border=True):
+        with st.container():
+            st.markdown("**Step 1: Power on/off**")
+            if snap.mode == FlightMode.OFF:
+                if st.button("Power on", type="primary", key="power_on"):
+                    bench.power_on()
+                    clear_demo_session()
+                    st.rerun()
+            else:
+                if st.button("Power off", key="power_off"):
+                    bench.power_off()
+                    clear_demo_session()
+                    st.rerun()
+                if recovery_landing_complete(snap):
+                    if st.button("Start new preflight", type="primary", key="new_preflight"):
+                        bench.power_off()
+                        bench.power_on()
+                        clear_demo_session()
+                        st.rerun()
 
-    if snap.mode == FlightMode.OFF:
-        if st.button("Power On", type="primary", key="power_on"):
-            bench.power_on()
-            clear_demo_session()
-            st.rerun()
-    else:
-        if st.button("Power Off", key="power_off"):
-            bench.power_off()
-            clear_demo_session()
-            st.rerun()
-        if recovery_landing_complete(snap):
-            if st.button("Start New Preflight", type="primary", key="new_preflight"):
-                bench.power_off()
-                bench.power_on()
-                clear_demo_session()
+        with st.container():
+            st.markdown("**Step 2: Inject Motor Fault**")
+            motor_options = list(range(1, NUM_MOTORS + 1))
+            if "fault_motor" not in st.session_state:
+                st.session_state.fault_motor = 1
+            st.selectbox(
+                "Motor",
+                motor_options,
+                format_func=lambda m: f"Motor {m}",
+                key="fault_motor",
+                label_visibility="collapsed",
+            )
+            fault_disabled = snap.mode != FlightMode.RUNNING
+            selected_motor = st.session_state.fault_motor
+            if st.button(
+                f"Stall motor {selected_motor}",
+                disabled=fault_disabled,
+                key="inject_stall",
+            ):
+                bench.inject_stall(selected_motor)
                 st.rerun()
-
-    st.markdown("#### Throttle")
-    if snap.mode == FlightMode.RUNNING:
-        if "throttle_input" not in st.session_state:
-            st.session_state.throttle_input = int(snap.throttle_pct)
-        st.number_input(
-            "Throttle (%)",
-            min_value=0,
-            max_value=100,
-            key="throttle_input",
-            label_visibility="collapsed",
-            on_change=lambda: get_bench().set_throttle(float(st.session_state.throttle_input)),
-        )
-    else:
-        st.number_input(
-            "Throttle (%)",
-            min_value=0,
-            max_value=100,
-            value=int(snap.throttle_pct),
-            disabled=True,
-            label_visibility="collapsed",
-        )
-
-    st.markdown("#### Fault injection")
-    motor_options = list(range(1, NUM_MOTORS + 1))
-    if "fault_motor" not in st.session_state:
-        st.session_state.fault_motor = 1
-    st.selectbox(
-        "Motor",
-        motor_options,
-        format_func=lambda m: f"Motor {m}",
-        key="fault_motor",
-        label_visibility="collapsed",
-    )
-    fault_disabled = snap.mode != FlightMode.RUNNING
-    selected_motor = st.session_state.fault_motor
-    if st.button(
-        f"Stall Motor {selected_motor}",
-        disabled=fault_disabled,
-        key="inject_stall",
-        use_container_width=True,
-    ):
-        bench.inject_stall(selected_motor)
-        st.rerun()
-
-
-@st.fragment
-def bench_controls() -> None:
-    snap = get_display_snapshot()
-    render_controls_column(snap, get_bench())
 
 
 @st.fragment(run_every=0.15)
-def live_schematic() -> None:
+def live_mission_sequence() -> None:
+    snap = get_display_snapshot()
+    render_mission_sequence(snap)
+
+
+@st.fragment(run_every=0.15)
+def live_visuals() -> None:
     if st.session_state.get("demo_frozen"):
         snap = st.session_state.frozen_snapshot
     else:
-        snap = get_display_snapshot()
-    selected = st.session_state.get("fault_motor")
-    st.markdown("#### Octocopter")
-    render_octocopter_schematic(
-        snap.motors,
-        snap.mode,
-        recovery_phase=snap.recovery_phase,
-        selected_motor=selected,
-    )
+        snap = get_bench().snapshot()
 
-
-@st.fragment(run_every=0.15)
-def live_telemetry() -> None:
-    snap = get_display_snapshot()
-
-    if snap.mode != FlightMode.OFF:
+    if snap.mode != FlightMode.OFF and not st.session_state.get("demo_frozen"):
         append_rpm_history(snap)
+        maybe_freeze_demo(snap)
 
-    render_recovery_stepper(snap)
-    render_story_banner(snap)
-
-    st.markdown("#### RPM trend")
-    render_rpm_trend_chart(snap)
-    if st.session_state.get("demo_frozen"):
-        st.caption("Timeline paused at touchdown — review how each motor responded during recovery.")
-    else:
-        st.caption("Live tachometer readings — stalled motor highlighted in red.")
+    schematic_col, chart_col = st.columns([1, 3])
+    with schematic_col:
+        st.markdown("#### Octocopter")
+        with st.container(border=True):
+            render_octocopter_schematic(
+                snap.motors,
+                snap.mode,
+                recovery_phase=snap.recovery_phase,
+                selected_motor=st.session_state.get("fault_motor"),
+            )
+    with chart_col:
+        st.markdown("#### RPM trend")
+        render_rpm_trend_chart(snap)
+        if st.session_state.get("demo_frozen"):
+            st.caption("Timeline paused at touchdown — review how each motor responded during recovery.")
+        else:
+            st.caption("Live tachometer readings — stalled motor highlighted in red.")
 
 
 def render_instro_faq_section() -> None:
     st.divider()
-    st.markdown("## FAQ")
+    st.markdown('## Nominal Instro FAQ')
 
     with st.container(border=True):
         with st.expander("What is Nominal Instro?"):
             st.markdown(
-                "Nominal Instro is a Python library for talking to test-and-measurement instruments "
+                "[Nominal Instro](https://github.com/nominal-io/instro) is a Python library for talking to test-and-measurement instruments "
                 "(power supplies, multimeters, electronic loads, DAQs, oscilloscopes, PLCs) from a "
                 "unified, typed API."
             )
@@ -530,18 +486,26 @@ def main() -> None:
     )
     inject_styles()
 
-    st.markdown("# :material/sensors: Octocopter motor failure testbench - Powered by Nominal Instro")
-    st.markdown("""This app is designed to test the recovery logic for our octocopter. Start the motors, choose one to inject a fault into, and watch the system safely execute a simulated landing sequence using the remaining working motors.
-    """)
+    st.markdown("# Octocopter motor failure testbench - Powered by Nominal Instro")
+    st.markdown(
+        "This app is designed to test the recovery logic for our octocopter. Start the motors, "
+        "choose one to inject a fault into, and watch the system safely execute a simulated "
+        "landing sequence using the remaining working motors."
+    )
 
-    controls_col, schematic_col = st.columns([2, 3])
-    with controls_col:
-        bench_controls()
-    with schematic_col:
-        live_schematic()
+    with st.container(border=True):
+        st.markdown("#### Why Nominal Instro?")
+        st.markdown(
+            "I wanted to develop on a simulated bench and deploy on real hardware without rewriting "
+            "test logic. [Nominal Instro](https://github.com/nominal-io/instro) is a hardware abstraction layer that lets me swap out the hardware underneath without rewriting the test logic. "
+            "I use `SimulatedLabJackT7` for this demo, and `LabJackTSeriesDriver` on the actual rig. "
+            "Same aliases, same reads and writes, different hardware."
+        )
 
-    live_telemetry()
-
+    snap = get_display_snapshot()
+    render_top_controls(snap, get_bench())
+    live_mission_sequence()
+    live_visuals()
     render_instro_faq_section()
 
 
