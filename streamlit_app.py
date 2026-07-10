@@ -572,8 +572,7 @@ def main() -> None:
     )
 
     bench = get_bench()
-    if apply_preview_from_query(bench):
-        st.rerun()
+    apply_preview_from_query(bench)
 
     inject_styles()
 
