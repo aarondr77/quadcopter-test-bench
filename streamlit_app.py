@@ -43,6 +43,40 @@ def clear_demo_session() -> None:
     st.session_state.pop("recovery_chart_started_at", None)
 
 
+def apply_preview_from_query(bench: BenchSupervisor) -> bool:
+    """Honor ?power=on&motor=6 (or ?preview=1&motor=6) for shareable test entry points."""
+    if st.session_state.get("_preview_applied"):
+        return False
+
+    qp = st.query_params
+    preview = qp.get("preview")
+    power = qp.get("power")
+    motor_raw = qp.get("motor")
+
+    should_power_on = power in ("on", "1", "true") or preview in ("1", "true", "ready", "stall-test")
+    if not should_power_on and motor_raw is None:
+        return False
+
+    changed = False
+    if motor_raw is not None:
+        try:
+            motor = int(motor_raw)
+        except (TypeError, ValueError):
+            motor = None
+        if motor is not None and 1 <= motor <= NUM_MOTORS:
+            if st.session_state.get("fault_motor") != motor:
+                st.session_state.fault_motor = motor
+                changed = True
+
+    if should_power_on and bench.snapshot().mode == FlightMode.OFF:
+        bench.power_on()
+        clear_demo_session()
+        changed = True
+
+    st.session_state._preview_applied = True
+    return changed
+
+
 def get_display_snapshot():
     """Return live snapshot, or freeze everything at landing for review."""
     if st.session_state.get("demo_frozen") and st.session_state.get("frozen_snapshot"):
@@ -484,6 +518,11 @@ def main() -> None:
         page_icon=":material/sensors:",
         layout="wide",
     )
+
+    bench = get_bench()
+    if apply_preview_from_query(bench):
+        st.rerun()
+
     inject_styles()
 
     st.markdown("# Octocopter motor failure testbench - Powered by Nominal Instro")
@@ -503,7 +542,7 @@ def main() -> None:
         )
 
     snap = get_display_snapshot()
-    render_top_controls(snap, get_bench())
+    render_top_controls(snap, bench)
     live_mission_sequence()
     live_visuals()
     render_instro_faq_section()
