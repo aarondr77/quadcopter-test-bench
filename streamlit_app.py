@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from urllib.parse import parse_qs, unquote
 
 import altair as alt
 import pandas as pd
@@ -41,6 +42,91 @@ def clear_demo_session() -> None:
     st.session_state.pop("demo_frozen", None)
     st.session_state.pop("frozen_snapshot", None)
     st.session_state.pop("recovery_chart_started_at", None)
+
+
+def _flatten_query_params(qp) -> dict[str, str]:
+    """Normalize st.query_params, including over-encoded links from chat/PR renderers."""
+    flat: dict[str, str] = {}
+    for key, value in qp.items():
+        val = value if isinstance(value, str) else (value[0] if value else "")
+        flat[str(key)] = val
+
+    for raw in list(flat.keys()) + [v for v in flat.values() if v]:
+        decoded = unquote(raw)
+        if decoded == raw and "=" not in decoded:
+            continue
+        for part in decoded.split("&"):
+            if "=" not in part:
+                continue
+            name, _, part_value = part.partition("=")
+            if name and name not in flat:
+                flat[name] = unquote(part_value)
+    return flat
+
+
+def _preview_targets_from_query(qp) -> tuple[bool, int | None]:
+    """Return (should_power_on, motor_or_none) from URL query params."""
+    flat = _flatten_query_params(qp)
+
+    preset = flat.get("preset")
+    if preset == "stall-m6":
+        return True, 6
+    if preset and preset.startswith("stall-m"):
+        try:
+            motor = int(preset.removeprefix("stall-m"))
+        except ValueError:
+            motor = None
+        if motor is not None and 1 <= motor <= NUM_MOTORS:
+            return True, motor
+
+    preview = flat.get("preview")
+    power = flat.get("power")
+    motor_raw = flat.get("motor")
+
+    should_power_on = power in ("on", "1", "true") or preview in (
+        "1",
+        "true",
+        "ready",
+        "stall-test",
+    )
+
+    motor: int | None = None
+    if motor_raw is not None:
+        try:
+            candidate = int(motor_raw)
+        except (TypeError, ValueError):
+            candidate = None
+        if candidate is not None and 1 <= candidate <= NUM_MOTORS:
+            motor = candidate
+
+    return should_power_on, motor
+
+
+def apply_preview_from_query(bench: BenchSupervisor) -> bool:
+    """Honor preview URLs for shareable test entry points.
+
+    Preferred (encoding-safe): ``?preset=stall-m6``
+    Also supported: ``?power=on&motor=6`` and ``?preview=ready&motor=6``
+    """
+    if st.session_state.get("_preview_applied"):
+        return False
+
+    should_power_on, motor = _preview_targets_from_query(st.query_params)
+    if not should_power_on and motor is None:
+        return False
+
+    changed = False
+    if motor is not None and st.session_state.get("fault_motor") != motor:
+        st.session_state.fault_motor = motor
+        changed = True
+
+    if should_power_on and bench.snapshot().mode == FlightMode.OFF:
+        bench.power_on()
+        clear_demo_session()
+        changed = True
+
+    st.session_state._preview_applied = True
+    return changed
 
 
 def get_display_snapshot():
@@ -373,36 +459,32 @@ def render_top_controls(snap, bench: BenchSupervisor) -> None:
                 st.rerun()
 
 
-@st.fragment(run_every=0.15)
-def live_mission_sequence() -> None:
-    snap = get_display_snapshot()
-    render_mission_sequence(snap)
-
-
-@st.fragment(run_every=0.15)
-def live_visuals() -> None:
+def render_live_sections(snap) -> None:
     if st.session_state.get("demo_frozen"):
-        snap = st.session_state.frozen_snapshot
+        live_snap = st.session_state.frozen_snapshot
     else:
-        snap = get_bench().snapshot()
+        live_snap = snap
 
-    if snap.mode != FlightMode.OFF and not st.session_state.get("demo_frozen"):
-        append_rpm_history(snap)
-        maybe_freeze_demo(snap)
+    if live_snap.mode != FlightMode.OFF and not st.session_state.get("demo_frozen"):
+        append_rpm_history(live_snap)
+        maybe_freeze_demo(live_snap)
+        live_snap = get_display_snapshot()
+
+    render_mission_sequence(live_snap)
 
     schematic_col, chart_col = st.columns([1, 3])
     with schematic_col:
         st.markdown("#### Octocopter")
         with st.container(border=True):
             render_octocopter_schematic(
-                snap.motors,
-                snap.mode,
-                recovery_phase=snap.recovery_phase,
+                live_snap.motors,
+                live_snap.mode,
+                recovery_phase=live_snap.recovery_phase,
                 selected_motor=st.session_state.get("fault_motor"),
             )
     with chart_col:
         st.markdown("#### RPM trend")
-        render_rpm_trend_chart(snap)
+        render_rpm_trend_chart(live_snap)
         if st.session_state.get("demo_frozen"):
             st.caption("Timeline paused at touchdown — review how each motor responded during recovery.")
         else:
@@ -484,6 +566,10 @@ def main() -> None:
         page_icon=":material/sensors:",
         layout="wide",
     )
+
+    bench = get_bench()
+    apply_preview_from_query(bench)
+
     inject_styles()
 
     st.markdown("# Octocopter motor failure testbench - Powered by Nominal Instro")
@@ -503,10 +589,13 @@ def main() -> None:
         )
 
     snap = get_display_snapshot()
-    render_top_controls(snap, get_bench())
-    live_mission_sequence()
-    live_visuals()
+    render_top_controls(snap, bench)
+    render_live_sections(snap)
     render_instro_faq_section()
+
+    if snap.mode != FlightMode.OFF and not st.session_state.get("demo_frozen"):
+        time.sleep(0.15)
+        st.rerun()
 
 
 if __name__ == "__main__":
