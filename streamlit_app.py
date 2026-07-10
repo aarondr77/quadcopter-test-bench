@@ -459,36 +459,32 @@ def render_top_controls(snap, bench: BenchSupervisor) -> None:
                 st.rerun()
 
 
-@st.fragment(run_every=0.15)
-def live_mission_sequence() -> None:
-    snap = get_display_snapshot()
-    render_mission_sequence(snap)
-
-
-@st.fragment(run_every=0.15)
-def live_visuals() -> None:
+def render_live_sections(snap) -> None:
     if st.session_state.get("demo_frozen"):
-        snap = st.session_state.frozen_snapshot
+        live_snap = st.session_state.frozen_snapshot
     else:
-        snap = get_bench().snapshot()
+        live_snap = snap
 
-    if snap.mode != FlightMode.OFF and not st.session_state.get("demo_frozen"):
-        append_rpm_history(snap)
-        maybe_freeze_demo(snap)
+    if live_snap.mode != FlightMode.OFF and not st.session_state.get("demo_frozen"):
+        append_rpm_history(live_snap)
+        maybe_freeze_demo(live_snap)
+        live_snap = get_display_snapshot()
+
+    render_mission_sequence(live_snap)
 
     schematic_col, chart_col = st.columns([1, 3])
     with schematic_col:
         st.markdown("#### Octocopter")
         with st.container(border=True):
             render_octocopter_schematic(
-                snap.motors,
-                snap.mode,
-                recovery_phase=snap.recovery_phase,
+                live_snap.motors,
+                live_snap.mode,
+                recovery_phase=live_snap.recovery_phase,
                 selected_motor=st.session_state.get("fault_motor"),
             )
     with chart_col:
         st.markdown("#### RPM trend")
-        render_rpm_trend_chart(snap)
+        render_rpm_trend_chart(live_snap)
         if st.session_state.get("demo_frozen"):
             st.caption("Timeline paused at touchdown — review how each motor responded during recovery.")
         else:
@@ -594,9 +590,12 @@ def main() -> None:
 
     snap = get_display_snapshot()
     render_top_controls(snap, bench)
-    live_mission_sequence()
-    live_visuals()
+    render_live_sections(snap)
     render_instro_faq_section()
+
+    if snap.mode != FlightMode.OFF and not st.session_state.get("demo_frozen"):
+        time.sleep(0.15)
+        st.rerun()
 
 
 if __name__ == "__main__":
