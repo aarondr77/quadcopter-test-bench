@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from urllib.parse import parse_qs, unquote
 
 import altair as alt
 import pandas as pd
@@ -43,30 +44,81 @@ def clear_demo_session() -> None:
     st.session_state.pop("recovery_chart_started_at", None)
 
 
+def _flatten_query_params(qp) -> dict[str, str]:
+    """Normalize st.query_params, including over-encoded links from chat/PR renderers."""
+    flat: dict[str, str] = {}
+    for key, value in qp.items():
+        val = value if isinstance(value, str) else (value[0] if value else "")
+        flat[str(key)] = val
+
+    for raw in list(flat.keys()) + [v for v in flat.values() if v]:
+        decoded = unquote(raw)
+        if decoded == raw and "=" not in decoded:
+            continue
+        for part in decoded.split("&"):
+            if "=" not in part:
+                continue
+            name, _, part_value = part.partition("=")
+            if name and name not in flat:
+                flat[name] = unquote(part_value)
+    return flat
+
+
+def _preview_targets_from_query(qp) -> tuple[bool, int | None]:
+    """Return (should_power_on, motor_or_none) from URL query params."""
+    flat = _flatten_query_params(qp)
+
+    preset = flat.get("preset")
+    if preset == "stall-m6":
+        return True, 6
+    if preset and preset.startswith("stall-m"):
+        try:
+            motor = int(preset.removeprefix("stall-m"))
+        except ValueError:
+            motor = None
+        if motor is not None and 1 <= motor <= NUM_MOTORS:
+            return True, motor
+
+    preview = flat.get("preview")
+    power = flat.get("power")
+    motor_raw = flat.get("motor")
+
+    should_power_on = power in ("on", "1", "true") or preview in (
+        "1",
+        "true",
+        "ready",
+        "stall-test",
+    )
+
+    motor: int | None = None
+    if motor_raw is not None:
+        try:
+            candidate = int(motor_raw)
+        except (TypeError, ValueError):
+            candidate = None
+        if candidate is not None and 1 <= candidate <= NUM_MOTORS:
+            motor = candidate
+
+    return should_power_on, motor
+
+
 def apply_preview_from_query(bench: BenchSupervisor) -> bool:
-    """Honor ?power=on&motor=6 (or ?preview=1&motor=6) for shareable test entry points."""
+    """Honor preview URLs for shareable test entry points.
+
+    Preferred (encoding-safe): ``?preset=stall-m6``
+    Also supported: ``?power=on&motor=6`` and ``?preview=ready&motor=6``
+    """
     if st.session_state.get("_preview_applied"):
         return False
 
-    qp = st.query_params
-    preview = qp.get("preview")
-    power = qp.get("power")
-    motor_raw = qp.get("motor")
-
-    should_power_on = power in ("on", "1", "true") or preview in ("1", "true", "ready", "stall-test")
-    if not should_power_on and motor_raw is None:
+    should_power_on, motor = _preview_targets_from_query(st.query_params)
+    if not should_power_on and motor is None:
         return False
 
     changed = False
-    if motor_raw is not None:
-        try:
-            motor = int(motor_raw)
-        except (TypeError, ValueError):
-            motor = None
-        if motor is not None and 1 <= motor <= NUM_MOTORS:
-            if st.session_state.get("fault_motor") != motor:
-                st.session_state.fault_motor = motor
-                changed = True
+    if motor is not None and st.session_state.get("fault_motor") != motor:
+        st.session_state.fault_motor = motor
+        changed = True
 
     if should_power_on and bench.snapshot().mode == FlightMode.OFF:
         bench.power_on()
